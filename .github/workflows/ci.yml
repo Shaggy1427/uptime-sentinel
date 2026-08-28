@@ -36,6 +36,27 @@ jobs:
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=high
 
+  shell:
+    name: Shell scripts and systemd unit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: ShellCheck the install scripts
+        run: shellcheck scripts/*.sh
+
+      - name: Validate the systemd unit
+        run: |
+          sed -e 's|__PREFIX__|/opt/uptime-sentinel|g' \
+              -e 's|__DATADIR__|/var/lib/uptime-sentinel|g' \
+              -e 's|__CONFDIR__|/etc/uptime-sentinel|g' \
+              -e 's|__USER__|uptime-sentinel|g' \
+              -e 's|__NODE_BIN__|/usr/bin/node|g' \
+              -e 's|__PROTECT_HOME__|yes|g' \
+              packaging/uptime-sentinel.service > /tmp/uptime-sentinel.service
+          ! grep -q '__' /tmp/uptime-sentinel.service
+          systemd-analyze verify /tmp/uptime-sentinel.service
+
   docker:
     name: Docker image builds
     runs-on: ubuntu-latest
