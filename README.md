@@ -180,7 +180,8 @@ All configuration is environment variables. See [`.env.example`](.env.example).
 |----------|---------|-------|
 | `PORT` / `HOST` | `8080` / `0.0.0.0` | Where the dashboard listens |
 | `PUBLIC_URL` | — | Used as the tap-through link on notifications |
-| `AUTH_PASSWORD` | — | Blank disables the login screen. Set it if the dashboard is reachable off-LAN |
+| `AUTH_PASSWORD` | — | Blank disables auth entirely. See [Security](#security) |
+| `TRUST_PROXY` | `false` | Set `true` only behind a reverse proxy you control, so rate limits key on the real client IP |
 | `DATA_DIR` | `/data` (Docker), `./data` otherwise | SQLite database location. The systemd installer sets it to `/var/lib/uptime-sentinel` |
 | `RETENTION_DAYS` | `30` | Individual checks are pruned after this. Incidents are kept forever |
 | `NTFY_URL` | `https://ntfy.sh` | Point at your own ntfy instance if you self-host |
@@ -222,6 +223,39 @@ Everything the dashboard does is a plain REST call, so you can script it.
 | `POST` | `/api/test-notification` | Send a test push |
 
 With `AUTH_PASSWORD` set, pass `Authorization: Bearer <password>`.
+
+## Security
+
+The dashboard is built for a trusted LAN, and the defaults reflect that. What
+that means concretely:
+
+**With `AUTH_PASSWORD` unset, the API is fully open** to anyone who can reach the
+port. Because this is a monitoring tool, that is more capability than it sounds:
+a monitor is an instruction to make an HTTP request with an arbitrary method,
+URL and headers, or to open a TCP connection, and the result comes back as an
+up/down signal. Anyone who can create monitors can use the server to reach hosts
+they cannot reach themselves and infer what is listening. Set a password before
+exposing the port beyond a network you trust.
+
+**When auth is on**, the login endpoint is rate limited to 10 attempts per 5
+minutes per IP, passwords are compared in constant time, and session cookies are
+signed with a random 32-byte key stored at `$DATA_DIR/.cookie-secret` — not with
+your password. The cookie is `HttpOnly`, `SameSite=Lax`, and gains `Secure`
+automatically when `PUBLIC_URL` is `https://`.
+
+**Credentials you give a monitor** (an `Authorization` header for an endpoint
+that needs one) are write-only. They are sent upstream on every check but never
+returned by the API — responses show the header names with `<redacted>` values.
+
+**`/api/health` is deliberately unauthenticated** so an external dead-man's-switch
+can poll it. It returns only counts and a version, never targets.
+
+**Behind a reverse proxy**, set `TRUST_PROXY=true` so rate limits key on the real
+client rather than the proxy. Do not set it otherwise: without a proxy stripping
+the header, clients could spoof `X-Forwarded-For` and evade throttling.
+
+Found something? Open a private security advisory on the repository rather than
+a public issue.
 
 ## Notes and limitations
 

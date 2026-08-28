@@ -78,7 +78,10 @@ for item in package.json package-lock.json tsconfig.json src public; do
 done
 
 say "Installing dependencies and building (this takes a minute on a Pi)"
-( cd "$STAGE" && npm ci --no-audit --no-fund >/dev/null )
+# --ignore-scripts: npm runs lifecycle scripts as root here, so a compromised
+# transitive dependency would execute with full privileges. No production
+# dependency needs them.
+( cd "$STAGE" && npm ci --ignore-scripts --no-audit --no-fund >/dev/null )
 ( cd "$STAGE" && npm run build >/dev/null )
 ( cd "$STAGE" && npm prune --omit=dev --no-audit --no-fund >/dev/null )
 
