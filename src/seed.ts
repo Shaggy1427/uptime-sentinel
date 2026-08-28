@@ -12,8 +12,20 @@ import type { MonitorInput } from './types.ts';
 export function seedIfEmpty(): number {
   if (listMonitors().length > 0) return 0;
 
-  const candidates = [process.env.MONITORS_FILE, path.resolve('monitors.json')].filter(Boolean) as string[];
-  const file = candidates.find((f) => fs.existsSync(f));
+  // An explicitly configured file that is missing is a configuration mistake
+  // worth surfacing, not something to silently work around with the default.
+  const explicit = process.env.MONITORS_FILE;
+  let file: string | undefined;
+  if (explicit) {
+    if (!fs.existsSync(explicit)) {
+      console.error(`[seed] MONITORS_FILE is set to ${explicit}, but that file does not exist - nothing seeded`);
+      return 0;
+    }
+    file = explicit;
+  } else {
+    const fallback = path.resolve('monitors.json');
+    if (fs.existsSync(fallback)) file = fallback;
+  }
   if (!file) return 0;
 
   let parsed: unknown;

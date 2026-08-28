@@ -31,6 +31,8 @@ test('parseHostPort handles IPv4, hostnames and IPv6 literals', () => {
   assert.deepEqual(parseHostPort('[::1]:8080'), { host: '::1', port: 8080 });
   assert.equal(parseHostPort('no-port'), null);
   assert.equal(parseHostPort('host:99999'), null);
+  assert.equal(parseHostPort('host:80abc'), null);
+  assert.equal(parseHostPort('http://127.0.0.1:1'), null);
 });
 
 test('formatDuration is human readable', () => {
@@ -48,8 +50,24 @@ test('headerSafe strips characters that would break an HTTP header', () => {
 
 test('validateMonitor rejects mismatched targets', () => {
   assert.throws(() => validateMonitor({ name: 'x', type: 'http', target: '192.168.1.1' }, { partial: false }), ValidationError);
+  assert.throws(() => validateMonitor({ name: 'x', type: 'http', target: 'not a url' }, { partial: false }), ValidationError);
   assert.throws(() => validateMonitor({ name: 'x', type: 'tcp', target: 'tower' }, { partial: false }), ValidationError);
+  assert.throws(() => validateMonitor({ name: 'x', type: 'tcp', target: 'tower:99999' }, { partial: false }), ValidationError);
+  assert.throws(() => validateMonitor({ name: 'x', type: 'ping', target: 'http://tower' }, { partial: false }), ValidationError);
   assert.throws(() => validateMonitor({ name: 'x', type: 'gopher', target: 'a' }, { partial: false }), ValidationError);
+});
+
+test('validateMonitor cross-checks a PATCH against the stored monitor', () => {
+  const http = { type: 'http', target: 'http://tower/login', method: 'GET', keyword: null } as const;
+
+  // Changing only the type must re-validate the stored target.
+  assert.throws(() => validateMonitor({ type: 'tcp' }, { partial: true, current: http }), ValidationError);
+  // Changing only the target must be validated against the stored type.
+  assert.throws(() => validateMonitor({ target: 'tower:445' }, { partial: true, current: http }), ValidationError);
+  // Changing both into a consistent pair is fine.
+  const ok = validateMonitor({ type: 'tcp', target: 'tower:445' }, { partial: true, current: http });
+  assert.equal(ok.type, 'tcp');
+  assert.equal(ok.target, 'tower:445');
 });
 
 test('validateMonitor accepts a well formed monitor and clamps nothing silently', () => {
@@ -65,4 +83,33 @@ test('validateMonitor accepts a well formed monitor and clamps nothing silently'
 
 test('validateMonitor in partial mode allows a single field', () => {
   assert.deepEqual(validateMonitor({ paused: true }, { partial: true }), { paused: true });
+});
+
+test('validateMonitor rejects keyword with HEAD and non-string header values', () => {
+  assert.throws(
+    () =>
+      validateMonitor(
+        { name: 'x', type: 'http', target: 'http://tower', method: 'HEAD', keyword: 'ok' },
+        { partial: false },
+      ),
+    ValidationError,
+  );
+  // Also when HEAD comes from the stored monitor and only the keyword is patched in.
+  assert.throws(
+    () =>
+      validateMonitor(
+        { keyword: 'ok' },
+        { partial: true, current: { type: 'http', target: 'http://tower', method: 'HEAD', keyword: null } },
+      ),
+    ValidationError,
+  );
+  assert.throws(
+    () => validateMonitor({ name: 'x', type: 'http', target: 'http://tower', headers: { a: 1 } }, { partial: false }),
+    ValidationError,
+  );
+  const ok = validateMonitor(
+    { name: 'x', type: 'http', target: 'http://tower', headers: { a: 'b' } },
+    { partial: false },
+  );
+  assert.deepEqual(ok.headers, { a: 'b' });
 });

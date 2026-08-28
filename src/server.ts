@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Fastify from 'fastify';
@@ -16,6 +17,45 @@ const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 
 const DAY = 86_400_000;
 const AUTH_COOKIE = 'sentinel_auth';
 const OPEN_ROUTES = new Set(['/api/health', '/api/login', '/api/auth']);
+
+/** Compare without leaking the first differing position through timing. */
+function safeEqual(a: string, b: string): boolean {
+  const ha = crypto.createHash('sha256').update(a).digest();
+  const hb = crypto.createHash('sha256').update(b).digest();
+  return crypto.timingSafeEqual(ha, hb);
+}
+
+// ------------------------------------------------------- login rate limiting
+
+const LOGIN_WINDOW_MS = 60_000;
+const LOGIN_MAX_FAILURES = 10;
+const failedLogins = new Map<string, { count: number; windowStart: number }>();
+
+function recordFailedLogin(ip: string): void {
+  const now = Date.now();
+  const entry = failedLogins.get(ip);
+  if (!entry || now - entry.windowStart >= LOGIN_WINDOW_MS) {
+    failedLogins.set(ip, { count: 1, windowStart: now });
+    return;
+  }
+  entry.count += 1;
+}
+
+function loginBlocked(ip: string): boolean {
+  const entry = failedLogins.get(ip);
+  return !!entry && Date.now() - entry.windowStart < LOGIN_WINDOW_MS && entry.count > LOGIN_MAX_FAILURES;
+}
+
+function clearFailedLogins(ip: string): void {
+  failedLogins.delete(ip);
+}
+
+/** Integer limit params that fall back to a default and clamp to [1, max]. */
+function clampLimit(value: string | undefined, fallback: number, max: number): number {
+  const n = Number.parseInt(value ?? '', 10);
+  if (Number.isNaN(n) || n < 1) return fallback;
+  return Math.min(n, max);
+}
 
 function describe(monitor: Monitor) {
   const state = scheduler.getState(monitor.id);
@@ -63,7 +103,7 @@ export async function buildServer() {
     if (OPEN_ROUTES.has(routePath)) return;
 
     const bearer = req.headers.authorization?.replace(/^Bearer\s+/i, '');
-    if (bearer && bearer === config.authPassword) return;
+    if (bearer && safeEqual(bearer, config.authPassword)) return;
 
     const raw = req.cookies[AUTH_COOKIE];
     if (raw) {
@@ -85,8 +125,15 @@ export async function buildServer() {
 
   app.post('/api/login', async (req, reply) => {
     if (!authEnabled) return { ok: true };
+    if (loginBlocked(req.ip)) {
+      return reply.code(429).send({ error: 'Too many failed attempts, try again later' });
+    }
     const { password } = (req.body ?? {}) as { password?: string };
-    if (password !== config.authPassword) return reply.code(401).send({ error: 'Wrong password' });
+    if (!safeEqual(password ?? '', config.authPassword)) {
+      recordFailedLogin(req.ip);
+      return reply.code(401).send({ error: 'Wrong password' });
+    }
+    clearFailedLogins(req.ip);
     reply.setCookie(AUTH_COOKIE, 'ok', {
       path: '/',
       httpOnly: true,
@@ -141,8 +188,11 @@ export async function buildServer() {
 
   app.patch<{ Params: { id: string } }>('/api/monitors/:id', async (req, reply) => {
     const id = Number(req.params.id);
-    if (!store.getMonitor(id)) return reply.code(404).send({ error: 'Monitor not found' });
-    const patch = validateMonitor(req.body, { partial: true });
+    const existing = store.getMonitor(id);
+    if (!existing) return reply.code(404).send({ error: 'Monitor not found' });
+    // Pass the stored monitor so the patch is validated in combination with
+    // it (e.g. a new type is checked against the existing target).
+    const patch = validateMonitor(req.body, { partial: true, current: existing });
     const monitor = store.updateMonitor(id, patch);
     scheduler.sync();
     return monitor;
@@ -156,20 +206,23 @@ export async function buildServer() {
   });
 
   app.post<{ Params: { id: string } }>('/api/monitors/:id/check', async (req, reply) => {
-    const result = await scheduler.runNow(Number(req.params.id));
+    const monitor = store.getMonitor(Number(req.params.id));
+    if (!monitor) return reply.code(404).send({ error: 'Monitor not found' });
+    if (monitor.paused) return reply.code(409).send({ error: 'Monitor is paused' });
+    const result = await scheduler.runNow(monitor.id);
     if (!result) return reply.code(404).send({ error: 'Monitor not found' });
     return result;
   });
 
   app.get<{ Params: { id: string }; Querystring: { limit?: string } }>(
     '/api/monitors/:id/checks',
-    async (req) => store.recentChecks(Number(req.params.id), Math.min(Number(req.query.limit ?? 200), 1000)),
+    async (req) => store.recentChecks(Number(req.params.id), clampLimit(req.query.limit, 200, 1000)),
   );
 
   // ------------------------------------------------------------- incidents
 
   app.get<{ Querystring: { limit?: string; monitorId?: string } }>('/api/incidents', async (req) => {
-    const limit = Math.min(Number(req.query.limit ?? 50), 500);
+    const limit = clampLimit(req.query.limit, 50, 500);
     const monitorId = req.query.monitorId ? Number(req.query.monitorId) : undefined;
     const incidents = store.listIncidents(limit, monitorId);
     const names = new Map(store.listMonitors().map((m) => [m.id, m.name]));

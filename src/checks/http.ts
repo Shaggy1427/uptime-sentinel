@@ -4,6 +4,9 @@ import type { CheckResult, Monitor } from '../types.ts';
 
 const USER_AGENT = 'uptime-sentinel/0.1 (+https://github.com/Shaggy1427/uptime-sentinel)';
 
+/** How much of a response body we are willing to buffer for a keyword scan. */
+const KEYWORD_BODY_CAP_BYTES = 2 * 1024 * 1024;
+
 /** Reused so we don't leak a connection pool per check. */
 const insecureAgent = new Agent({ connect: { rejectUnauthorized: false } });
 
@@ -23,9 +26,10 @@ export async function httpCheck(monitor: Monitor): Promise<CheckResult> {
     const res = await fetch(monitor.target, init as RequestInit);
     const statusCode = res.status;
 
-    let body: string | null = null;
+    let found = false;
     if (monitor.keyword) {
-      body = await res.text();
+      const body = await readBodyCapped(res, KEYWORD_BODY_CAP_BYTES);
+      found = body.includes(monitor.keyword);
     } else {
       // Drain so the socket returns to the pool instead of hanging around.
       await res.body?.cancel().catch(() => {});
@@ -38,7 +42,6 @@ export async function httpCheck(monitor: Monitor): Promise<CheckResult> {
     }
 
     if (monitor.keyword) {
-      const found = (body ?? '').includes(monitor.keyword);
       if (monitor.keywordInverted && found) {
         return { ok: false, statusCode, latencyMs, error: `Forbidden keyword "${monitor.keyword}" present in body` };
       }
@@ -56,6 +59,43 @@ export async function httpCheck(monitor: Monitor): Promise<CheckResult> {
       error: describeFetchError(err, monitor.timeoutMs),
     };
   }
+}
+
+/** Read a response body up to `cap` bytes so a huge reply cannot exhaust memory. */
+async function readBodyCapped(res: Response, cap: number): Promise<string> {
+  const reader = res.body?.getReader();
+  if (!reader) return '';
+
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  let done = false;
+  try {
+    while (size < cap) {
+      const { done: streamDone, value } = await reader.read();
+      if (streamDone) {
+        done = true;
+        break;
+      }
+      if (!value) continue;
+      chunks.push(value);
+      size += value.byteLength;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  if (!done) {
+    // Body is bigger than the cap: drop the rest so the connection is freed.
+    await res.body?.cancel().catch(() => {});
+  }
+
+  const all = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    all.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(all);
 }
 
 function describeFetchError(err: unknown, timeoutMs: number): string {

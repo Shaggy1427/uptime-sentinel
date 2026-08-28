@@ -52,8 +52,13 @@ button.danger:hover { border-color: var(--down); color: var(--down); }
 }
 .brand { display: flex; align-items: center; gap: .55rem; }
 .logo { font-size: 1.3rem; }
-.summary { display: flex; gap: 1rem; color: var(--muted); font-size: .875rem; flex-wrap: wrap; }
+.summary { display: flex; gap: 1rem; color: var(--muted); font-size: .875rem; flex-wrap: wrap; align-items: center; }
 .summary b { color: var(--text); font-variant-numeric: tabular-nums; }
+.config-warning {
+  color: var(--down); font-size: .78rem; border-radius: 20px; padding: .1rem .55rem;
+  background: color-mix(in srgb, var(--down) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--down) 40%, transparent);
+}
 .actions { margin-left: auto; display: flex; gap: .5rem; }
 
 main { max-width: 1280px; margin: 0 auto; padding: 1.25rem; }
