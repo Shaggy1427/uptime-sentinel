@@ -122,7 +122,28 @@ sed -e "s|__PREFIX__|$PREFIX|g" \
 chmod 644 "$UNIT"
 systemctl daemon-reload
 
+# Best-effort address for the "open it here" hint. hostname -I is Debian/net-tools
+# and absent on some distros, so fall back to iproute2, then to nothing.
+# Every substitution here is guarded: the script runs under `set -e` with
+# pipefail, so an unmatched grep or a missing flag would otherwise abort the
+# install after all the work is already done.
+guess_address() {
+  local ip=""
+  ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+  if [[ -z "$ip" ]]; then
+    ip="$(ip -4 -o addr show scope global 2>/dev/null | awk '{split($4, a, "/"); print a[1]; exit}' || true)"
+  fi
+  printf '%s' "$ip"
+}
+
+HOST_NAME="$(hostname 2>/dev/null || echo localhost)"
+HOST_IP="$(guess_address)"
+UI_PORT="$(grep -E '^PORT=' "$ENV_FILE" | cut -d= -f2 || true)"
+UI_PORT="${UI_PORT:-8080}"
+
 if [[ "${NEW_CONFIG:-0}" == "1" ]]; then
+  # Note: this heredoc is unquoted so the variables above expand. Do not inline
+  # an awk script here -- the shell would eat its $1 before awk ever sees it.
   cat <<EOF
 
   Installed, but not started yet.
@@ -135,6 +156,10 @@ if [[ "${NEW_CONFIG:-0}" == "1" ]]; then
 
   3. Watch it come up:
        journalctl -u uptime-sentinel -f
+
+  4. Open the dashboard:
+       http://$HOST_NAME:$UI_PORT${HOST_IP:+
+       http://$HOST_IP:$UI_PORT}
 
 EOF
   exit 0
@@ -151,8 +176,7 @@ if (( START_SERVICE )); then
   fi
   sleep 2
   if systemctl is-active --quiet uptime-sentinel; then
-    PORT="$(grep -E '^PORT=' "$ENV_FILE" | cut -d= -f2)"
-    say "Running at http://$(hostname -f 2>/dev/null || hostname):${PORT:-8080}"
+    say "Dashboard at http://$HOST_NAME:$UI_PORT${HOST_IP:+ (or http://$HOST_IP:$UI_PORT)}"
   else
     warn "Service is not running. Recent log:"
     journalctl -u uptime-sentinel -n 20 --no-pager >&2 || true

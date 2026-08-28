@@ -7,6 +7,9 @@ phone **only when something has been down long enough to be worth your attention
 Built to watch an Unraid server from a Raspberry Pi sitting next to it — so when
 the server goes down, the thing doing the watching is still up.
 
+It serves a web dashboard on port 8080 where you add monitors and see current
+state, uptime and incident history — no config files required after setup.
+
 ```
 ┌──────────────┐   http / tcp / ping    ┌─────────────────┐
 │ Raspberry Pi │ ─────────────────────▶ │ Unraid + others │
@@ -152,7 +155,61 @@ Useful for trying it out, or on macOS/Windows where the systemd path does not
 apply. Nothing restarts it if it crashes or the machine reboots — use Option A
 or B for anything you actually depend on.
 
-### 3. Seed monitors from a file (optional)
+### 3. Open the dashboard
+
+However you started it, the web UI is on **port 8080**:
+
+```
+http://<the-machine-running-it>:8080
+```
+
+On the machine itself that is <http://localhost:8080>. From another device use
+its hostname or address — e.g. `http://raspberrypi.local:8080`, or
+`http://192.168.1.42:8080`. To find the address, run one of these on the host:
+
+```bash
+hostname                                       # its name, usually <name>.local
+hostname -I | awk '{print $1}'                 # its LAN IP (Debian, Raspberry Pi OS)
+ip -4 -o addr show scope global | awk '{print $4}'   # its LAN IP (any Linux)
+```
+
+Change the port with `PORT` in your `.env` (and the published port in
+`docker-compose.yml` if you use Docker).
+
+**First run**, the page is empty. Two things to do:
+
+1. **Test alert** (top right) — sends a push through ntfy. Do this before you
+   trust it with anything; it is the fastest way to catch a wrong topic name.
+2. **Add monitor** — name it, pick HTTP / TCP / Ping, and give it a target.
+   [Monitor types](#monitor-types) has the target format for each.
+
+The page refreshes itself every 10 seconds. Cards are sorted worst-first, so
+anything broken is at the top. Each card shows a latency sparkline (red bars are
+failed checks), 24-hour and 30-day uptime, and buttons to check it now, pause it,
+edit it, or delete it. Below the cards is the incident history, including whether
+each outage was long enough to actually notify you.
+
+If you set `AUTH_PASSWORD`, you get a login prompt first.
+
+<details>
+<summary>The page will not load</summary>
+
+- **Is it running?** `docker compose ps` / `systemctl status uptime-sentinel`.
+  For the manual path, check the terminal you started it in.
+- **Is it listening where you think?** Startup logs the bound address. `HOST`
+  must be `0.0.0.0` (the default) to accept connections from other machines —
+  `127.0.0.1` only accepts local ones.
+- **Can you reach it at all?** `curl -s http://<host>:8080/api/health` returns
+  JSON and never needs a password. If that works but the browser does not, the
+  problem is DNS or a proxy, not the app.
+- **Firewall?** On the host: `sudo ufw allow 8080/tcp`, or the firewalld or
+  iptables equivalent.
+- **`.local` name not resolving?** Use the IP address instead; `.local` needs
+  mDNS/Avahi on both machines.
+
+</details>
+
+### 4. Seed monitors from a file (optional)
 
 Instead of clicking through the UI, put a `monitors.json` next to the compose
 file (uncomment the mount in `docker-compose.yml`), or point `MONITORS_FILE` at
