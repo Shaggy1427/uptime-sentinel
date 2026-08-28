@@ -1,0 +1,45 @@
+[
+  {
+    "name": "Unraid WebGUI",
+    "type": "http",
+    "target": "http://192.168.1.10/login",
+    "intervalS": 60,
+    "alertAfterS": 180,
+    "keyword": "Unraid"
+  },
+  {
+    "name": "Unraid host (ping)",
+    "type": "ping",
+    "target": "192.168.1.10",
+    "intervalS": 30,
+    "alertAfterS": 120
+  },
+  {
+    "name": "SMB / file shares",
+    "type": "tcp",
+    "target": "192.168.1.10:445",
+    "intervalS": 60,
+    "alertAfterS": 300
+  },
+  {
+    "name": "Plex",
+    "type": "http",
+    "target": "http://192.168.1.10:32400/identity",
+    "intervalS": 60,
+    "alertAfterS": 300
+  },
+  {
+    "name": "Home Assistant",
+    "type": "http",
+    "target": "http://192.168.1.10:8123",
+    "acceptedStatus": "200-299,302",
+    "alertAfterS": 300
+  },
+  {
+    "name": "Internet (uplink)",
+    "type": "http",
+    "target": "https://1.1.1.1",
+    "intervalS": 120,
+    "alertAfterS": 300
+  }
+]

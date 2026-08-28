@@ -1,0 +1,344 @@
+const $ = (sel) => document.querySelector(sel);
+const REFRESH_MS = 10_000;
+
+let timer = null;
+let editingId = null;
+
+// ------------------------------------------------------------------ helpers
+
+async function api(path, options = {}) {
+  const res = await fetch(path, {
+    headers: options.body ? { 'Content-Type': 'application/json' } : undefined,
+    ...options,
+  });
+  if (res.status === 401) {
+    showLogin();
+    throw new Error('Unauthorized');
+  }
+  if (res.status === 204) return null;
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+  return data;
+}
+
+function duration(ms) {
+  if (ms == null) return '--';
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (d) return `${d}d ${h}h`;
+  if (h) return `${h}h ${m}m`;
+  return `${m}m`;
+}
+
+function ago(ts) {
+  return ts == null ? 'never' : `${duration(Date.now() - ts)} ago`;
+}
+
+function pct(ratio) {
+  return ratio == null ? '--' : `${(ratio * 100).toFixed(ratio > 0.999 ? 2 : 1)}%`;
+}
+
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text != null) node.textContent = text;
+  return node;
+}
+
+function banner(message, kind) {
+  const node = $('#banner');
+  if (!message) return node.classList.add('hidden');
+  node.textContent = message;
+  node.className = `banner ${kind || ''}`;
+  if (kind === 'ok') setTimeout(() => node.classList.add('hidden'), 4000);
+}
+
+// ------------------------------------------------------------------- render
+
+function sparkline(history) {
+  const wrap = el('div', 'spark');
+  const slots = 40;
+  const padded = Array(Math.max(0, slots - history.length)).fill(null).concat(history.slice(-slots));
+  const latencies = history.filter((h) => h.ok && h.latencyMs != null).map((h) => h.latencyMs);
+  const max = Math.max(1, ...latencies);
+
+  for (const point of padded) {
+    const bar = el('i');
+    if (!point) {
+      bar.className = 'empty';
+    } else if (!point.ok) {
+      bar.className = 'bad';
+      bar.style.height = '100%';
+      bar.title = 'Failed check';
+    } else {
+      const height = Math.max(12, Math.round(((point.latencyMs ?? 0) / max) * 100));
+      bar.style.height = `${height}%`;
+      bar.title = `${point.latencyMs ?? '?'}ms - ${new Date(point.checkedAt).toLocaleTimeString()}`;
+    }
+    wrap.append(bar);
+  }
+  return wrap;
+}
+
+function monitorCard(m) {
+  const card = el('article', `card monitor ${m.status}`);
+
+  const head = el('div', 'm-head');
+  head.append(el('span', 'dot'), el('span', 'm-name', m.name), el('span', 'm-type', m.type));
+  card.append(head, el('div', 'm-target', m.target));
+
+  if (m.status === 'down' && m.lastResult?.error) {
+    const err = el('div', 'm-error', m.lastResult.error);
+    if (m.downSinceMs != null) err.textContent += ` - down ${duration(m.downSinceMs)}`;
+    card.append(err);
+  }
+
+  card.append(sparkline(m.history));
+
+  const stats = el('div', 'm-stats');
+  const stat = (label, value) => {
+    const s = el('span', null, `${label} `);
+    s.append(el('b', null, value));
+    return s;
+  };
+  stats.append(
+    stat('24h', pct(m.uptime.day.ratio)),
+    stat('30d', pct(m.uptime.month.ratio)),
+    stat('latency', m.uptime.day.avgLatencyMs != null ? `${m.uptime.day.avgLatencyMs}ms` : '--'),
+    stat('checked', ago(m.lastCheckedAt)),
+  );
+  card.append(stats);
+
+  const actions = el('div', 'm-actions');
+  const check = el('button', 'tiny ghost', 'Check now');
+  check.onclick = async () => {
+    check.disabled = true;
+    check.textContent = 'Checking...';
+    try {
+      await api(`/api/monitors/${m.id}/check`, { method: 'POST' });
+      await refresh();
+    } catch (err) {
+      banner(err.message, 'err');
+      check.disabled = false;
+      check.textContent = 'Check now';
+    }
+  };
+
+  const pause = el('button', 'tiny ghost', m.paused ? 'Resume' : 'Pause');
+  pause.onclick = async () => {
+    await api(`/api/monitors/${m.id}`, { method: 'PATCH', body: JSON.stringify({ paused: !m.paused }) });
+    await refresh();
+  };
+
+  const edit = el('button', 'tiny ghost', 'Edit');
+  edit.onclick = () => openEditor(m);
+
+  const remove = el('button', 'tiny ghost danger', 'Delete');
+  remove.onclick = async () => {
+    if (!confirm(`Delete "${m.name}"? Its history and incidents go too.`)) return;
+    await api(`/api/monitors/${m.id}`, { method: 'DELETE' });
+    await refresh();
+  };
+
+  actions.append(check, pause, el('span', 'spacer'), edit, remove);
+  card.append(actions);
+  return card;
+}
+
+function renderMonitors(monitors) {
+  const grid = $('#monitors');
+  grid.replaceChildren();
+  if (monitors.length === 0) {
+    grid.append(el('p', 'empty-state', 'No monitors yet. Click "Add monitor" to start watching something.'));
+    return;
+  }
+  const rank = { down: 0, pending: 1, up: 2, paused: 3 };
+  monitors.sort((a, b) => rank[a.status] - rank[b.status] || a.name.localeCompare(b.name));
+  for (const m of monitors) grid.append(monitorCard(m));
+}
+
+function renderSummary(monitors, notificationsConfigured) {
+  const count = (status) => monitors.filter((m) => m.status === status).length;
+  const summary = $('#summary');
+  summary.replaceChildren();
+  const add = (label, value) => {
+    const s = el('span', null, `${label} `);
+    s.append(el('b', null, String(value)));
+    summary.append(s);
+  };
+  add('up', count('up'));
+  add('down', count('down'));
+  add('paused', count('paused'));
+
+  if (!notificationsConfigured) {
+    banner('No ntfy topic configured - alerts are being dropped. Set NTFY_TOPIC and restart.', 'err');
+  }
+  document.title = count('down') > 0 ? `(${count('down')} down) Uptime Sentinel` : 'Uptime Sentinel';
+}
+
+function renderIncidents(incidents) {
+  const host = $('#incidents');
+  host.replaceChildren();
+  if (incidents.length === 0) {
+    host.append(el('p', 'empty-state', 'No incidents recorded. Quiet is good.'));
+    return;
+  }
+  const table = el('table');
+  const thead = el('thead');
+  const hrow = el('tr');
+  for (const h of ['Monitor', 'Started', 'Duration', 'Alerted', 'Cause', '']) hrow.append(el('th', null, h));
+  thead.append(hrow);
+  const tbody = el('tbody');
+
+  for (const i of incidents) {
+    const row = el('tr');
+    const end = i.resolvedAt ?? Date.now();
+    row.append(
+      el('td', null, i.monitorName),
+      el('td', null, new Date(i.startedAt).toLocaleString()),
+      el('td', null, duration(end - i.startedAt)),
+      el('td', null, i.alertedAt ? 'yes' : 'no'),
+      el('td', 'cause', i.cause ?? '--'),
+    );
+    const statusCell = el('td');
+    statusCell.append(el('span', `pill ${i.resolvedAt ? 'closed' : 'open'}`, i.resolvedAt ? 'resolved' : 'ongoing'));
+    row.append(statusCell);
+    tbody.append(row);
+  }
+  table.append(thead, tbody);
+  host.append(table);
+}
+
+// ------------------------------------------------------------------ editor
+
+const HINTS = {
+  http: 'Full URL including scheme, e.g. http://192.168.1.10/login',
+  tcp: 'host:port, e.g. 192.168.1.10:445',
+  ping: 'Hostname or IP, e.g. 192.168.1.10',
+};
+
+function syncEditorType() {
+  const type = $('#editor-form').elements.type.value;
+  $('#target-hint').textContent = HINTS[type];
+  for (const node of document.querySelectorAll('.http-only')) node.classList.toggle('hidden', type !== 'http');
+}
+
+function openEditor(monitor) {
+  editingId = monitor?.id ?? null;
+  const form = $('#editor-form');
+  form.reset();
+  $('#editor-title').textContent = monitor ? `Edit ${monitor.name}` : 'Add monitor';
+  $('#editor-error').classList.add('hidden');
+
+  if (monitor) {
+    for (const key of ['name', 'type', 'target', 'intervalS', 'timeoutMs', 'retries', 'alertAfterS', 'reminderEveryS', 'method', 'acceptedStatus']) {
+      if (form.elements[key]) form.elements[key].value = monitor[key] ?? '';
+    }
+    form.elements.keyword.value = monitor.keyword ?? '';
+    form.elements.keywordInverted.checked = monitor.keywordInverted;
+    form.elements.ignoreTls.checked = monitor.ignoreTls;
+  }
+  syncEditorType();
+  $('#editor').showModal();
+}
+
+async function saveEditor(event) {
+  event.preventDefault();
+  const form = $('#editor-form');
+  const f = form.elements;
+  const payload = {
+    name: f.name.value.trim(),
+    type: f.type.value,
+    target: f.target.value.trim(),
+    intervalS: Number(f.intervalS.value),
+    timeoutMs: Number(f.timeoutMs.value),
+    retries: Number(f.retries.value),
+    alertAfterS: Number(f.alertAfterS.value),
+    reminderEveryS: Number(f.reminderEveryS.value),
+    method: f.method.value,
+    acceptedStatus: f.acceptedStatus.value.trim() || '200-299',
+    keyword: f.keyword.value.trim() || null,
+    keywordInverted: f.keywordInverted.checked,
+    ignoreTls: f.ignoreTls.checked,
+  };
+
+  try {
+    if (editingId) await api(`/api/monitors/${editingId}`, { method: 'PATCH', body: JSON.stringify(payload) });
+    else await api('/api/monitors', { method: 'POST', body: JSON.stringify(payload) });
+    $('#editor').close();
+    await refresh();
+  } catch (err) {
+    const box = $('#editor-error');
+    box.textContent = err.message;
+    box.classList.remove('hidden');
+  }
+}
+
+// ------------------------------------------------------------------- login
+
+function showLogin() {
+  if (timer) clearInterval(timer);
+  timer = null;
+  $('#login').classList.remove('hidden');
+}
+
+async function submitLogin(event) {
+  event.preventDefault();
+  const error = $('#login-error');
+  try {
+    const res = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: $('#login-password').value }),
+    });
+    if (!res.ok) throw new Error('Wrong password');
+    $('#login').classList.add('hidden');
+    error.classList.add('hidden');
+    start();
+  } catch (err) {
+    error.textContent = err.message;
+    error.classList.remove('hidden');
+  }
+}
+
+// -------------------------------------------------------------------- boot
+
+async function refresh() {
+  const [status, incidents] = await Promise.all([api('/api/status'), api('/api/incidents?limit=25')]);
+  renderSummary(status.monitors, status.notificationsConfigured);
+  renderMonitors(status.monitors);
+  renderIncidents(incidents);
+  $('#refreshed').textContent = `Updated ${new Date().toLocaleTimeString()}`;
+}
+
+function start() {
+  if (timer) clearInterval(timer);
+  refresh().catch((err) => banner(err.message, 'err'));
+  timer = setInterval(() => refresh().catch(() => {}), REFRESH_MS);
+}
+
+$('#btn-add').onclick = () => openEditor(null);
+$('#editor-cancel').onclick = () => $('#editor').close();
+$('#editor-form').addEventListener('submit', saveEditor);
+$('#editor-form').elements.type.addEventListener('change', syncEditorType);
+$('#login-form').addEventListener('submit', submitLogin);
+
+$('#btn-test').onclick = async () => {
+  const btn = $('#btn-test');
+  btn.disabled = true;
+  try {
+    const res = await api('/api/test-notification', { method: 'POST', body: JSON.stringify({}) });
+    const failed = res.results.filter((r) => !r.ok);
+    if (failed.length) banner(`Test failed: ${failed.map((r) => `${r.channel}: ${r.error}`).join('; ')}`, 'err');
+    else banner('Test notification sent to ntfy.', 'ok');
+  } catch (err) {
+    banner(err.message, 'err');
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+start();

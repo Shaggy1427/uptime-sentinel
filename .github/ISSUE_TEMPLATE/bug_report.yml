@@ -1,0 +1,32 @@
+name: Bug report
+description: Something is not working the way it should
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you expect instead?
+    validations: { required: true }
+  - type: textarea
+    id: monitor
+    attributes:
+      label: Monitor configuration
+      description: Type, target (redact hostnames/IPs if you like), interval, retries, alert-after.
+      render: text
+  - type: textarea
+    id: logs
+    attributes:
+      label: Container logs
+      description: "`docker logs uptime-sentinel --tail 100`"
+      render: shell
+  - type: input
+    id: version
+    attributes:
+      label: Image tag or commit
+      placeholder: "ghcr.io/shaggy1427/uptime-sentinel:latest"
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options: [Raspberry Pi (arm64), x86_64 Linux, Other]
