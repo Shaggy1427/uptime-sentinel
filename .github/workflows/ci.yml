@@ -47,11 +47,13 @@ jobs:
 
       - name: Validate the systemd unit
         run: |
-          sed -e 's|__PREFIX__|/opt/uptime-sentinel|g' \
+          # systemd-analyze checks that ExecStart actually exists, so point it
+          # at the runner's real node rather than a hardcoded path.
+          sed -e "s|__NODE_BIN__|$(command -v node)|g" \
+              -e 's|__PREFIX__|/opt/uptime-sentinel|g' \
               -e 's|__DATADIR__|/var/lib/uptime-sentinel|g' \
               -e 's|__CONFDIR__|/etc/uptime-sentinel|g' \
               -e 's|__USER__|uptime-sentinel|g' \
-              -e 's|__NODE_BIN__|/usr/bin/node|g' \
               -e 's|__PROTECT_HOME__|yes|g' \
               packaging/uptime-sentinel.service > /tmp/uptime-sentinel.service
           ! grep -q '__' /tmp/uptime-sentinel.service
