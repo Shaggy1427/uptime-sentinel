@@ -5,7 +5,7 @@ import type { CheckResult, Monitor } from '../types.ts';
  * Hostnames/IPs only. execFile does not use a shell, so this is not about
  * injection -- it stops a target like "-f" being read as a ping flag.
  */
-const SAFE_HOST = /^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$/;
+export const SAFE_HOST = /^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$/;
 
 export function pingCheck(monitor: Monitor): Promise<CheckResult> {
   const host = monitor.target.trim();
@@ -18,13 +18,16 @@ export function pingCheck(monitor: Monitor): Promise<CheckResult> {
     });
   }
 
-  const deadlineS = Math.max(1, Math.ceil(monitor.timeoutMs / 1000));
+  // Linux iputils ping takes -W in seconds, but BSD/macOS ping takes
+  // milliseconds there - pass the right unit for the platform.
+  const deadlineArg =
+    process.platform === 'darwin' ? String(monitor.timeoutMs) : String(Math.max(1, Math.ceil(monitor.timeoutMs / 1000)));
 
   return new Promise((resolve) => {
     const started = performance.now();
     execFile(
       'ping',
-      ['-n', '-c', '1', '-W', String(deadlineS), host],
+      ['-n', '-c', '1', '-W', deadlineArg, host],
       { timeout: monitor.timeoutMs + 1000, encoding: 'utf8' },
       (err, stdout, stderr) => {
         const wall = Math.round(performance.now() - started);
@@ -32,6 +35,14 @@ export function pingCheck(monitor: Monitor): Promise<CheckResult> {
           const m = /time[=<]\s*([\d.]+)\s*ms/i.exec(stdout);
           const latencyMs = m ? Math.round(Number(m[1])) : wall;
           return resolve({ ok: true, statusCode: null, latencyMs, error: null });
+        }
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+          return resolve({
+            ok: false,
+            statusCode: null,
+            latencyMs: null,
+            error: 'ping binary not found (on Debian/Ubuntu: apt install iputils-ping)',
+          });
         }
         const out = `${stdout}${stderr}`.trim();
         let error = 'No reply to ICMP echo request';

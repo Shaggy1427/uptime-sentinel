@@ -113,24 +113,32 @@ function monitorCard(m) {
   card.append(stats);
 
   const actions = el('div', 'm-actions');
-  const check = el('button', 'tiny ghost', 'Check now');
-  check.onclick = async () => {
-    check.disabled = true;
-    check.textContent = 'Checking...';
-    try {
-      await api(`/api/monitors/${m.id}/check`, { method: 'POST' });
-      await refresh();
-    } catch (err) {
-      banner(err.message, 'err');
-      check.disabled = false;
-      check.textContent = 'Check now';
-    }
-  };
+  if (!m.paused) {
+    // Paused monitors are inert; the server refuses manual checks for them.
+    const check = el('button', 'tiny ghost', 'Check now');
+    check.onclick = async () => {
+      check.disabled = true;
+      check.textContent = 'Checking...';
+      try {
+        await api(`/api/monitors/${m.id}/check`, { method: 'POST' });
+        await refresh();
+      } catch (err) {
+        banner(err.message, 'err');
+        check.disabled = false;
+        check.textContent = 'Check now';
+      }
+    };
+    actions.append(check);
+  }
 
   const pause = el('button', 'tiny ghost', m.paused ? 'Resume' : 'Pause');
   pause.onclick = async () => {
-    await api(`/api/monitors/${m.id}`, { method: 'PATCH', body: JSON.stringify({ paused: !m.paused }) });
-    await refresh();
+    try {
+      await api(`/api/monitors/${m.id}`, { method: 'PATCH', body: JSON.stringify({ paused: !m.paused }) });
+      await refresh();
+    } catch (err) {
+      banner(err.message, 'err');
+    }
   };
 
   const edit = el('button', 'tiny ghost', 'Edit');
@@ -139,11 +147,15 @@ function monitorCard(m) {
   const remove = el('button', 'tiny ghost danger', 'Delete');
   remove.onclick = async () => {
     if (!confirm(`Delete "${m.name}"? Its history and incidents go too.`)) return;
-    await api(`/api/monitors/${m.id}`, { method: 'DELETE' });
-    await refresh();
+    try {
+      await api(`/api/monitors/${m.id}`, { method: 'DELETE' });
+      await refresh();
+    } catch (err) {
+      banner(err.message, 'err');
+    }
   };
 
-  actions.append(check, pause, el('span', 'spacer'), edit, remove);
+  actions.append(pause, el('span', 'spacer'), edit, remove);
   card.append(actions);
   return card;
 }
@@ -174,7 +186,11 @@ function renderSummary(monitors, notificationsConfigured) {
   add('paused', count('paused'));
 
   if (!notificationsConfigured) {
-    banner('No ntfy topic configured - alerts are being dropped. Set NTFY_TOPIC and restart.', 'err');
+    // Lives in the summary bar, not the banner, so the 10s refresh does not
+    // clobber whatever transient banner the user just triggered.
+    const warn = el('span', 'config-warning', 'ntfy not configured - alerts are being dropped');
+    warn.title = 'Set NTFY_TOPIC and restart';
+    summary.append(warn);
   }
   document.title = count('down') > 0 ? `(${count('down')} down) Uptime Sentinel` : 'Uptime Sentinel';
 }

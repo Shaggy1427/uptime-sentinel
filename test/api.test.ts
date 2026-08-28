@@ -72,3 +72,69 @@ test('test-notification fails loudly when no channel is configured', async () =>
   assert.equal(res.statusCode, 400);
   assert.match(res.json().error, /NTFY_TOPIC/);
 });
+
+test('manual checks are refused for paused monitors', async () => {
+  const created = await app.inject({
+    method: 'POST',
+    url: '/api/monitors',
+    payload: { name: 'Paused', type: 'tcp', target: '127.0.0.1:9', paused: true, intervalS: 3600 },
+  });
+  assert.equal(created.statusCode, 201);
+  const id = created.json().id;
+
+  const check = await app.inject({ method: 'POST', url: `/api/monitors/${id}/check` });
+  assert.equal(check.statusCode, 409);
+
+  await app.inject({ method: 'DELETE', url: `/api/monitors/${id}` });
+});
+
+test('checks and incidents endpoints tolerate garbage and negative limit params', async () => {
+  const garbage = await app.inject({ method: 'GET', url: '/api/monitors/1/checks?limit=abc' });
+  assert.equal(garbage.statusCode, 200);
+  const negative = await app.inject({ method: 'GET', url: '/api/monitors/1/checks?limit=-1' });
+  assert.equal(negative.statusCode, 200);
+  const incidents = await app.inject({ method: 'GET', url: '/api/incidents?limit=notanumber' });
+  assert.equal(incidents.statusCode, 200);
+});
+
+test('PATCH cannot flip a monitor into a type its target does not support', async () => {
+  const created = await app.inject({
+    method: 'POST',
+    url: '/api/monitors',
+    payload: { name: 'Web', type: 'http', target: 'http://127.0.0.1:1/', intervalS: 3600 },
+  });
+  assert.equal(created.statusCode, 201);
+  const id = created.json().id;
+
+  const typeOnly = await app.inject({ method: 'PATCH', url: `/api/monitors/${id}`, payload: { type: 'tcp' } });
+  assert.equal(typeOnly.statusCode, 400);
+
+  const targetOnly = await app.inject({
+    method: 'PATCH',
+    url: `/api/monitors/${id}`,
+    payload: { target: 'tower:445' },
+  });
+  assert.equal(targetOnly.statusCode, 400);
+
+  await app.inject({ method: 'DELETE', url: `/api/monitors/${id}` });
+});
+
+test('deleting a monitor while its check is in flight does not break anything', async () => {
+  const created = await app.inject({
+    method: 'POST',
+    url: '/api/monitors',
+    payload: { name: 'Slow', type: 'tcp', target: '10.255.255.1:9', timeoutMs: 2000, intervalS: 3600 },
+  });
+  assert.equal(created.statusCode, 201);
+  const id = created.json().id;
+
+  const checkPromise = app.inject({ method: 'POST', url: `/api/monitors/${id}/check` });
+  // Let the check start, then pull the monitor out from under it.
+  await new Promise((r) => setTimeout(r, 150));
+  const del = await app.inject({ method: 'DELETE', url: `/api/monitors/${id}` });
+  assert.equal(del.statusCode, 204);
+
+  const check = await checkPromise;
+  assert.equal(check.statusCode, 200);
+  assert.equal(check.json().ok, false);
+});

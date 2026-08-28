@@ -69,10 +69,17 @@ git clone https://github.com/Shaggy1427/uptime-sentinel.git
 cd uptime-sentinel
 cp .env.example .env
 $EDITOR .env          # set NTFY_TOPIC and PUBLIC_URL at minimum
+mkdir -p data && sudo chown 1000:1000 data   # container runs as uid 1000
 docker compose up -d
 ```
 
 Upgrade with `docker compose pull && docker compose up -d`.
+
+> The container runs as an unprivileged user (uid 1000) and writes its SQLite
+> database to `./data`. If that directory is owned by root or another uid
+> (e.g. because `docker compose` was run with sudo), startup fails with an
+> "unable to open database file" error. The `chown` above fixes that; a named
+> volume works too if you would rather not manage ownership.
 
 ### Option B: systemd service (no Docker)
 
@@ -316,6 +323,13 @@ a public issue.
 
 ## Notes and limitations
 
+- **Monitors make this server fetch whatever targets you configure.** Creating a
+  monitor is therefore a privileged action: an http/tcp monitor can reach any
+  host the sentinel box can reach (including other internal services), and
+  keyword matching reveals something about response bodies. With the default
+  `AUTH_PASSWORD` unset, anyone who can reach the dashboard can create such
+  monitors. On a trusted LAN that is usually fine; before exposing the
+  dashboard beyond your network, set `AUTH_PASSWORD`.
 - **`/api/health` is unauthenticated** by design, so an external dead-man's-switch
   can poll it. It exposes only counts, never targets.
 - **ICMP needs a small privilege either way.** Under Docker, the compose file sets
