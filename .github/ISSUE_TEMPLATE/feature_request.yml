@@ -1,0 +1,20 @@
+name: Feature idea
+description: Something you want the monitor to do
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What do you want to be able to do?
+    validations: { required: true }
+  - type: textarea
+    id: sketch
+    attributes:
+      label: Rough idea of how it should work
+      description: Optional. New monitor type? New notification channel? UI change?
+  - type: checkboxes
+    id: roadmap
+    attributes:
+      label: Roadmap
+      options:
+        - label: I checked ROADMAP.md and this is not already listed

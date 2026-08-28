@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark light" />
+  <title>Uptime Sentinel</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>&#128225;</text></svg>" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div id="login" class="overlay hidden">
+    <form id="login-form" class="card login-card">
+      <h1>Uptime Sentinel</h1>
+      <label>Password<input type="password" id="login-password" autocomplete="current-password" required /></label>
+      <p id="login-error" class="error hidden"></p>
+      <button type="submit" class="primary">Sign in</button>
+    </form>
+  </div>
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">&#128225;</span>
+      <h1>Uptime Sentinel</h1>
+    </div>
+    <div id="summary" class="summary"></div>
+    <div class="actions">
+      <button id="btn-test" class="ghost" title="Send a test notification to ntfy">Test alert</button>
+      <button id="btn-add" class="primary">Add monitor</button>
+    </div>
+  </header>
+
+  <main>
+    <p id="banner" class="banner hidden"></p>
+    <section id="monitors" class="grid"></section>
+    <section class="incidents">
+      <h2>Recent incidents</h2>
+      <div id="incidents"></div>
+    </section>
+  </main>
+
+  <footer>
+    <span id="refreshed">&nbsp;</span>
+  </footer>
+
+  <dialog id="editor">
+    <form id="editor-form" method="dialog">
+      <h2 id="editor-title">Add monitor</h2>
+      <div class="fields">
+        <label class="wide">Name<input name="name" required maxlength="120" placeholder="Unraid WebGUI" /></label>
+
+        <label>Type
+          <select name="type">
+            <option value="http">HTTP(S)</option>
+            <option value="tcp">TCP port</option>
+            <option value="ping">Ping (ICMP)</option>
+          </select>
+        </label>
+
+        <label class="wide" id="field-target">Target
+          <input name="target" required placeholder="http://192.168.1.10/login" />
+          <small id="target-hint">Full URL including scheme.</small>
+        </label>
+
+        <label>Check every (s)<input name="intervalS" type="number" min="5" max="86400" value="60" /></label>
+        <label>Timeout (ms)<input name="timeoutMs" type="number" min="500" max="120000" value="10000" /></label>
+        <label>Retries before down<input name="retries" type="number" min="1" max="20" value="2" /></label>
+
+        <label>Alert after down for (s)
+          <input name="alertAfterS" type="number" min="0" max="86400" value="120" />
+          <small>0 = alert immediately</small>
+        </label>
+        <label>Remind every (s)
+          <input name="reminderEveryS" type="number" min="0" max="604800" value="1800" />
+          <small>0 = no reminders</small>
+        </label>
+
+        <fieldset class="http-only wide">
+          <legend>HTTP options</legend>
+          <div class="fields">
+            <label>Method
+              <select name="method">
+                <option>GET</option><option>HEAD</option><option>POST</option>
+                <option>PUT</option><option>PATCH</option><option>DELETE</option><option>OPTIONS</option>
+              </select>
+            </label>
+            <label>Accepted status<input name="acceptedStatus" value="200-299" placeholder="200-299,302" /></label>
+            <label class="wide">Body must contain<input name="keyword" placeholder="(optional) keyword" /></label>
+            <label class="check"><input type="checkbox" name="keywordInverted" /> Invert &mdash; alert if the keyword IS present</label>
+            <label class="check"><input type="checkbox" name="ignoreTls" /> Ignore TLS certificate errors</label>
+          </div>
+        </fieldset>
+      </div>
+      <p id="editor-error" class="error hidden"></p>
+      <menu>
+        <button type="button" id="editor-cancel" class="ghost">Cancel</button>
+        <button type="submit" class="primary">Save</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <script src="/app.js" type="module"></script>
+</body>
+</html>

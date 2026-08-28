@@ -1,0 +1,27 @@
+services:
+  uptime-sentinel:
+    # Use the prebuilt multi-arch image (amd64 + arm64):
+    image: ghcr.io/shaggy1427/uptime-sentinel:latest
+    # ...or build locally instead by commenting out `image` and uncommenting:
+    # build: .
+    container_name: uptime-sentinel
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+      # Optional: seed monitors on first boot from a JSON file.
+      # - ./monitors.json:/app/monitors.json:ro
+    environment:
+      TZ: ${TZ:-Etc/UTC}
+      PUBLIC_URL: ${PUBLIC_URL:-http://raspberrypi.local:8080}
+      AUTH_PASSWORD: ${AUTH_PASSWORD:-}
+      RETENTION_DAYS: ${RETENTION_DAYS:-30}
+      NTFY_URL: ${NTFY_URL:-https://ntfy.sh}
+      NTFY_TOPIC: ${NTFY_TOPIC:?set NTFY_TOPIC in your .env file}
+      NTFY_TOKEN: ${NTFY_TOKEN:-}
+      DEFAULT_ALERT_AFTER_S: ${DEFAULT_ALERT_AFTER_S:-120}
+      DEFAULT_REMINDER_EVERY_S: ${DEFAULT_REMINDER_EVERY_S:-1800}
+    # Lets an unprivileged container send ICMP echo requests (ping monitors).
+    sysctls:
+      - net.ipv4.ping_group_range=0 2147483647
