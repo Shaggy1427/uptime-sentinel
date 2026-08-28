@@ -29,7 +29,8 @@ CI runs both, plus a production `npm audit` and a multi-arch Docker build.
 
 ```
 src/
-  index.ts       entrypoint: seed, start scheduler, start server
+  index.ts       preflight: checks the Node version, then loads app.ts
+  app.ts         bootstrap: seed, start scheduler, start server, handle signals
   config.ts      all environment variables, read once
   db.ts          SQLite schema, migrations, and every query
   scheduler.ts   the check loop and the down/alert/recover state machine
@@ -38,7 +39,14 @@ src/
   checks/        one file per monitor type
   notify/        one file per notification channel
 public/          the dashboard (vanilla JS, no build step)
+packaging/       systemd unit template, with __PLACEHOLDERS__ filled at install
+scripts/         install.sh and uninstall.sh for the non-Docker path
 ```
+
+Three supported ways to run it — Docker, systemd, and by hand — all read the same
+environment variables and the same database. If you add configuration, make sure
+it works in all three: that means `.env.example`, the README table, and (if it
+needs a default that differs per install) the installer.
 
 ## Adding a notification channel
 

@@ -38,13 +38,28 @@ a single **RECOVERED** message with the total downtime.
 
 ## Quick start
 
+However you run it, step one is the same.
+
 ### 1. Pick an ntfy topic
 
 Install the [ntfy app](https://ntfy.sh/app) on your phone and subscribe to a topic.
 Topic names on the public server are effectively passwords — **use something long
 and random**, e.g. `unraid-3f9a2c7e41`.
 
-### 2. Run it
+### 2. Choose how to run it
+
+| | Best for | Node needed |
+|---|---|---|
+| [Docker](#option-a-docker) | Most people. Nothing to install, upgrades are one command | no |
+| [systemd service](#option-b-systemd-service-no-docker) | A Pi you would rather not put Docker on | yes, 24+ |
+| [Run it by hand](#option-c-run-it-by-hand) | Trying it out, or a non-Linux machine | yes, 24+ |
+
+All three read the same environment variables and use the same SQLite database,
+so you can move between them later without losing history.
+
+---
+
+### Option A: Docker
 
 ```bash
 git clone https://github.com/Shaggy1427/uptime-sentinel.git
@@ -54,14 +69,94 @@ $EDITOR .env          # set NTFY_TOPIC and PUBLIC_URL at minimum
 docker compose up -d
 ```
 
-Open `http://<your-pi>:8080`, click **Add monitor**, then **Test alert** to
-confirm the push lands on your phone.
+Upgrade with `docker compose pull && docker compose up -d`.
+
+### Option B: systemd service (no Docker)
+
+Needs Node 24 or newer, because the app uses the built-in `node:sqlite` module.
+Debian and Raspberry Pi OS still ship Node 18, so install a current one first:
+
+```bash
+curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash -
+sudo apt-get install -y nodejs
+```
+
+Then:
+
+```bash
+git clone https://github.com/Shaggy1427/uptime-sentinel.git
+cd uptime-sentinel
+sudo ./scripts/install.sh
+```
+
+The installer creates an unprivileged `uptime-sentinel` system user, builds into
+`/opt/uptime-sentinel`, puts the database in `/var/lib/uptime-sentinel`, and
+writes a hardened unit file. It stops before starting so you can set your topic:
+
+```bash
+sudoedit /etc/uptime-sentinel/uptime-sentinel.env
+sudo systemctl enable --now uptime-sentinel
+journalctl -u uptime-sentinel -f
+```
+
+**Upgrading** is `git pull && sudo ./scripts/install.sh` — the script is
+idempotent, builds into a temporary directory so a failed build cannot leave a
+broken service behind, and never touches your config or database.
+
+**Removing** is `sudo ./scripts/uninstall.sh`, which keeps your data, or
+`sudo ./scripts/uninstall.sh --purge`, which does not.
+
+The unit runs with `ProtectSystem=strict`, `NoNewPrivileges`, a syscall filter,
+and no write access to anything except its own data directory. It is granted
+`CAP_NET_RAW` solely so ICMP monitors work; if you only use `http` and `tcp`
+monitors you can delete those two lines from the unit.
+
+<details>
+<summary>Running as your own user instead, with no root at all</summary>
+
+```bash
+npm ci && npm run build
+mkdir -p ~/.config/systemd/user
+sed -e "s|__PREFIX__|$PWD|g" -e "s|__DATADIR__|$HOME/.local/share/uptime-sentinel|g" \
+    -e "s|__CONFDIR__|$HOME/.config/uptime-sentinel|g" -e "s|__NODE_BIN__|$(command -v node)|g" \
+    packaging/uptime-sentinel.service \
+  | grep -vE '^(User|Group|StateDirectory|ProtectHome|CapabilityBoundingSet|AmbientCapabilities)=' \
+  > ~/.config/systemd/user/uptime-sentinel.service
+
+mkdir -p ~/.config/uptime-sentinel ~/.local/share/uptime-sentinel
+cp .env.example ~/.config/uptime-sentinel/uptime-sentinel.env
+$EDITOR ~/.config/uptime-sentinel/uptime-sentinel.env   # set DATA_DIR and NTFY_TOPIC
+
+systemctl --user enable --now uptime-sentinel
+sudo loginctl enable-linger "$USER"   # so it keeps running when you log out
+```
+
+ICMP monitors will only work here if your system allows unprivileged pings
+(`sysctl net.ipv4.ping_group_range`). Use `tcp` monitors if not.
+
+</details>
+
+### Option C: Run it by hand
+
+```bash
+git clone https://github.com/Shaggy1427/uptime-sentinel.git
+cd uptime-sentinel
+cp .env.example .env
+$EDITOR .env
+npm ci
+npm run build
+npm start          # reads .env automatically
+```
+
+Useful for trying it out, or on macOS/Windows where the systemd path does not
+apply. Nothing restarts it if it crashes or the machine reboots — use Option A
+or B for anything you actually depend on.
 
 ### 3. Seed monitors from a file (optional)
 
-Instead of clicking through the UI, drop a `monitors.json` next to the compose
-file, uncomment the mount in `docker-compose.yml`, and it is imported on first
-boot. See [`monitors.example.json`](monitors.example.json) for the shape. This
+Instead of clicking through the UI, put a `monitors.json` next to the compose
+file (uncomment the mount in `docker-compose.yml`), or point `MONITORS_FILE` at
+one. See [`monitors.example.json`](monitors.example.json) for the shape. This
 only runs against an empty database — after that, the UI is the source of truth.
 
 ## Monitor types
@@ -86,7 +181,7 @@ All configuration is environment variables. See [`.env.example`](.env.example).
 | `PORT` / `HOST` | `8080` / `0.0.0.0` | Where the dashboard listens |
 | `PUBLIC_URL` | — | Used as the tap-through link on notifications |
 | `AUTH_PASSWORD` | — | Blank disables the login screen. Set it if the dashboard is reachable off-LAN |
-| `DATA_DIR` | `/data` | SQLite database location |
+| `DATA_DIR` | `/data` (Docker), `./data` otherwise | SQLite database location. The systemd installer sets it to `/var/lib/uptime-sentinel` |
 | `RETENTION_DAYS` | `30` | Individual checks are pruned after this. Incidents are kept forever |
 | `NTFY_URL` | `https://ntfy.sh` | Point at your own ntfy instance if you self-host |
 | `NTFY_TOPIC` | — | **Required.** Without it, alerts are dropped and the UI warns you |
@@ -98,7 +193,11 @@ All configuration is environment variables. See [`.env.example`](.env.example).
 ## Development
 
 Requires Node 24+ (it uses the built-in `node:sqlite` and native TypeScript
-stripping, so there is no compile step in dev and no native modules to build).
+stripping, so there is no compile step in dev and no native modules to build —
+which is what keeps ARM installs fast).
+
+Running on an older Node exits immediately with an explanation rather than an
+obscure module error.
 
 ```bash
 npm install
@@ -128,9 +227,11 @@ With `AUTH_PASSWORD` set, pass `Authorization: Bearer <password>`.
 
 - **`/api/health` is unauthenticated** by design, so an external dead-man's-switch
   can poll it. It exposes only counts, never targets.
-- **ICMP in containers**: the compose file sets `net.ipv4.ping_group_range` so the
-  unprivileged container can ping. If your host disallows that sysctl, use `tcp`
-  monitors instead.
+- **ICMP needs a small privilege either way.** Under Docker, the compose file sets
+  `net.ipv4.ping_group_range` so the unprivileged container can ping. Under
+  systemd, the unit grants `CAP_NET_RAW` (needed because `NoNewPrivileges`
+  disables the setcap bit on `/usr/bin/ping`). If neither is available to you,
+  use `tcp` monitors instead — for most services they tell you more anyway.
 - **Nothing watches the watcher.** If the Pi itself dies, you get silence. Pointing
   a free [healthchecks.io](https://healthchecks.io) check at this container's
   `/api/health` closes that gap — see [ROADMAP.md](ROADMAP.md).

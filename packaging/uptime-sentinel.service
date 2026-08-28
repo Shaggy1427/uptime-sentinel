@@ -1,0 +1,51 @@
+[Unit]
+Description=Uptime Sentinel - homelab uptime monitor
+Documentation=https://github.com/Shaggy1427/uptime-sentinel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+Group=__USER__
+WorkingDirectory=__PREFIX__
+EnvironmentFile=__CONFDIR__/uptime-sentinel.env
+ExecStart=__NODE_BIN__ __PREFIX__/dist/index.js
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=20s
+
+# --- filesystem ---
+StateDirectory=uptime-sentinel
+ReadWritePaths=__DATADIR__
+ProtectSystem=strict
+ProtectHome=__PROTECT_HOME__
+PrivateTmp=yes
+
+# --- privileges ---
+NoNewPrivileges=yes
+# ICMP monitors need raw sockets. NoNewPrivileges disables the setcap bit on
+# /usr/bin/ping, so the capability is granted directly instead. Drop both lines
+# if you only use http and tcp monitors.
+CapabilityBoundingSet=CAP_NET_RAW
+AmbientCapabilities=CAP_NET_RAW
+
+# --- kernel and system ---
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+# Do NOT set MemoryDenyWriteExecute: the V8 JIT needs writable-executable pages.
+
+[Install]
+WantedBy=multi-user.target
