@@ -9,3 +9,6 @@ data/
 *.db-wal
 *.db-shm
 .DS_Store
+
+# Claude Code worktrees (one per concurrent session)
+.claude/worktrees/
