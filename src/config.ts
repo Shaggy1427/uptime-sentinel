@@ -20,6 +20,10 @@ export const config = {
   host: str('HOST', '0.0.0.0'),
   publicUrl: str('PUBLIC_URL', '').replace(/\/+$/, ''),
   authPassword: str('AUTH_PASSWORD', ''),
+  // Behind a reverse proxy, honour X-Forwarded-For so rate limits are keyed on
+  // the real client rather than on the proxy. Only enable when a proxy you
+  // control actually sets that header -- otherwise clients can spoof it.
+  trustProxy: str('TRUST_PROXY', '') === 'true',
 
   dataDir,
   dbPath: path.join(dataDir, 'sentinel.db'),

@@ -16,6 +16,21 @@ export async function start(): Promise<void> {
   console.log(`  ntfy topic      ${config.ntfy.topic || '(NOT SET - alerts will be dropped)'}`);
   console.log(`  dashboard auth  ${config.authPassword ? 'enabled' : 'disabled'}`);
 
+  if (!config.authPassword) {
+    console.warn(
+      [
+        '',
+        '  WARNING: no AUTH_PASSWORD is set, so the API is open to anyone who can',
+        '  reach this port. They can read every monitor target, and create monitors',
+        '  that make this server issue arbitrary HTTP requests and TCP connections',
+        '  to hosts it can reach -- including ones they cannot reach themselves.',
+        '',
+        '  Fine on a trusted LAN. Set AUTH_PASSWORD before exposing it any wider.',
+        '',
+      ].join('\n'),
+    );
+  }
+
   let shuttingDown = false;
   const shutdown = async (signal: string) => {
     if (shuttingDown) return;
