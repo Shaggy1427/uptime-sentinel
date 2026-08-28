@@ -126,7 +126,10 @@ export class Scheduler {
     if (state) state.nextCheckAt = Date.now() + delayMs;
 
     const timer = setTimeout(() => {
-      void this.tick(monitor.id);
+      // A check must never be able to take the process down with it.
+      this.tick(monitor.id).catch((err) => {
+        console.error(`[scheduler] tick for monitor ${monitor.id} failed:`, err);
+      });
     }, delayMs);
     timer.unref();
     this.timers.set(monitor.id, timer);
@@ -139,13 +142,17 @@ export class Scheduler {
       return;
     }
     await this.execute(monitor);
-    if (this.running) this.schedule(monitor, monitor.intervalS * 1000);
+    // Re-read after the (possibly long) check: the monitor may have been
+    // paused or deleted while the check was in flight, in which case the
+    // stale snapshot must not resurrect its timer.
+    const current = getMonitor(monitorId);
+    if (this.running && current && !current.paused) this.schedule(current, current.intervalS * 1000);
   }
 
   /** Run a check right now, outside the schedule (used by the "Check now" button). */
   async runNow(monitorId: number): Promise<CheckResult | null> {
     const monitor = getMonitor(monitorId);
-    if (!monitor) return null;
+    if (!monitor || monitor.paused) return null;
     return this.execute(monitor);
   }
 
@@ -164,15 +171,26 @@ export class Scheduler {
     }
 
     const now = Date.now();
-    insertCheck(monitor.id, result, now);
-    state.lastResult = result;
-    state.lastCheckedAt = now;
+
+    // The monitor may have been deleted while the check was in flight;
+    // persisting would then violate the foreign key constraint. The result
+    // is still returned to the caller (e.g. runNow).
+    const current = getMonitor(monitor.id);
+    if (!current) return result;
 
     try {
-      if (result.ok) await this.handleUp(monitor, state, now);
-      else await this.handleDown(monitor, state, result, now);
+      insertCheck(current.id, result, now);
+      state.lastResult = result;
+      state.lastCheckedAt = now;
+
+      // Paused while the check was running: record the result, but treat the
+      // monitor as inert and do not open/resolve incidents or send alerts.
+      if (current.paused) return result;
+
+      if (result.ok) await this.handleUp(current, state, now);
+      else await this.handleDown(current, state, result, now);
     } catch (err) {
-      console.error(`[scheduler] post-check handling failed for "${monitor.name}":`, err);
+      console.error(`[scheduler] post-check handling failed for "${current.name}":`, err);
     }
 
     return result;
@@ -230,8 +248,15 @@ export class Scheduler {
 
     if (incident.alertedAt === null) {
       if (downForMs >= monitor.alertAfterS * 1000) {
-        markIncidentAlerted(incident.id, now);
-        await dispatch({ kind: 'down', monitor, incident, reason: result.error, downForMs, at: now });
+        const results = await dispatch({ kind: 'down', monitor, incident, reason: result.error, downForMs, at: now });
+        // Only record the alert once it was actually delivered somewhere.
+        // Otherwise the next failing check retries, so a momentary ntfy
+        // hiccup cannot swallow the first DOWN notification forever.
+        if (results.some((r) => r.ok)) {
+          markIncidentAlerted(incident.id, now);
+        } else if (results.length > 0) {
+          console.warn(`[scheduler] DOWN alert for "${monitor.name}" was not delivered; retrying on next check`);
+        }
       }
       return;
     }
@@ -239,8 +264,19 @@ export class Scheduler {
     if (monitor.reminderEveryS > 0) {
       const last = incident.lastReminderAt ?? incident.alertedAt;
       if (now - last >= monitor.reminderEveryS * 1000) {
-        markIncidentReminded(incident.id, now);
-        await dispatch({ kind: 'still-down', monitor, incident, reason: result.error, downForMs, at: now });
+        const results = await dispatch({
+          kind: 'still-down',
+          monitor,
+          incident,
+          reason: result.error,
+          downForMs,
+          at: now,
+        });
+        if (results.some((r) => r.ok)) {
+          markIncidentReminded(incident.id, now);
+        } else if (results.length > 0) {
+          console.warn(`[scheduler] reminder for "${monitor.name}" was not delivered; retrying on next check`);
+        }
       }
     }
   }

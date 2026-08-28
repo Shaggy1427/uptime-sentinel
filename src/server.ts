@@ -32,6 +32,13 @@ function redact(monitor: Monitor) {
   return { ...monitor, headers: masked };
 }
 
+/** Integer limit params that fall back to a default and clamp to [1, max]. */
+function clampLimit(value: string | undefined, fallback: number, max: number): number {
+  const n = Number.parseInt(value ?? '', 10);
+  if (Number.isNaN(n) || n < 1) return fallback;
+  return Math.min(n, max);
+}
+
 function describe(monitor: Monitor) {
   const state = scheduler.getState(monitor.id);
   const now = Date.now();
@@ -198,8 +205,11 @@ export async function buildServer() {
 
   app.patch<{ Params: { id: string } }>('/api/monitors/:id', async (req, reply) => {
     const id = Number(req.params.id);
-    if (!store.getMonitor(id)) return reply.code(404).send({ error: 'Monitor not found' });
-    const patch = validateMonitor(req.body, { partial: true });
+    const existing = store.getMonitor(id);
+    if (!existing) return reply.code(404).send({ error: 'Monitor not found' });
+    // Pass the stored monitor so the patch is validated in combination with
+    // it (e.g. a new type is checked against the existing target).
+    const patch = validateMonitor(req.body, { partial: true, current: existing });
     const monitor = store.updateMonitor(id, patch);
     scheduler.sync();
     return monitor ? redact(monitor) : monitor;
@@ -218,7 +228,10 @@ export async function buildServer() {
     '/api/monitors/:id/check',
     { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } },
     async (req, reply) => {
-      const result = await scheduler.runNow(Number(req.params.id));
+      const monitor = store.getMonitor(Number(req.params.id));
+      if (!monitor) return reply.code(404).send({ error: 'Monitor not found' });
+      if (monitor.paused) return reply.code(409).send({ error: 'Monitor is paused' });
+      const result = await scheduler.runNow(monitor.id);
       if (!result) return reply.code(404).send({ error: 'Monitor not found' });
       return result;
     },
@@ -226,13 +239,13 @@ export async function buildServer() {
 
   app.get<{ Params: { id: string }; Querystring: { limit?: string } }>(
     '/api/monitors/:id/checks',
-    async (req) => store.recentChecks(Number(req.params.id), Math.min(Number(req.query.limit ?? 200), 1000)),
+    async (req) => store.recentChecks(Number(req.params.id), clampLimit(req.query.limit, 200, 1000)),
   );
 
   // ------------------------------------------------------------- incidents
 
   app.get<{ Querystring: { limit?: string; monitorId?: string } }>('/api/incidents', async (req) => {
-    const limit = Math.min(Number(req.query.limit ?? 50), 500);
+    const limit = clampLimit(req.query.limit, 50, 500);
     const monitorId = req.query.monitorId ? Number(req.query.monitorId) : undefined;
     const incidents = store.listIncidents(limit, monitorId);
     const names = new Map(store.listMonitors().map((m) => [m.id, m.name]));

@@ -1,7 +1,18 @@
-import type { MonitorInput, MonitorType } from './types.ts';
+import { SAFE_HOST } from './checks/ping.ts';
+import { parseHostPort } from './checks/tcp.ts';
+import type { Monitor, MonitorInput, MonitorType } from './types.ts';
 
 const TYPES: MonitorType[] = ['http', 'tcp', 'ping'];
 const METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'];
+
+/** Bounds shared by the API (validate) and the env defaults (config). */
+export const LIMITS = {
+  intervalS: { min: 5, max: 86_400 },
+  timeoutMs: { min: 500, max: 120_000 },
+  retries: { min: 1, max: 20 },
+  alertAfterS: { min: 0, max: 86_400 },
+  reminderEveryS: { min: 0, max: 604_800 },
+} as const;
 
 export class ValidationError extends Error {}
 
@@ -12,8 +23,14 @@ function num(value: unknown, field: string, min: number, max: number): number {
   return n;
 }
 
+export interface ValidateOptions {
+  partial: boolean;
+  /** The stored monitor on PATCH, so fields can be validated in combination. */
+  current?: Pick<Monitor, 'type' | 'method' | 'keyword' | 'target'>;
+}
+
 /** Shared shape validation for create (strict) and patch (partial). */
-export function validateMonitor(input: unknown, { partial }: { partial: boolean }): Partial<MonitorInput> {
+export function validateMonitor(input: unknown, { partial, current }: ValidateOptions): Partial<MonitorInput> {
   if (typeof input !== 'object' || input === null) throw new ValidationError('Body must be an object');
   const raw = input as Record<string, unknown>;
   const out: Record<string, unknown> = {};
@@ -36,21 +53,43 @@ export function validateMonitor(input: unknown, { partial }: { partial: boolean 
   if (has('target')) {
     const target = String(raw.target).trim();
     if (!target) throw new ValidationError('target is required');
-    const type = (out.type ?? raw.type) as string | undefined;
-    if (type === 'http' && !/^https?:\/\//i.test(target)) {
-      throw new ValidationError('http monitors need a target starting with http:// or https://');
-    }
-    if (type === 'tcp' && !/:\d+$/.test(target)) {
-      throw new ValidationError('tcp monitors need a target in host:port form');
-    }
     out.target = target;
-  } else if (!partial) throw new ValidationError('target is required');
+  } else if (!partial) {
+    throw new ValidationError('target is required');
+  }
 
-  if (has('intervalS')) out.intervalS = num(raw.intervalS, 'intervalS', 5, 86_400);
-  if (has('timeoutMs')) out.timeoutMs = num(raw.timeoutMs, 'timeoutMs', 500, 120_000);
-  if (has('retries')) out.retries = num(raw.retries, 'retries', 1, 20);
-  if (has('alertAfterS')) out.alertAfterS = num(raw.alertAfterS, 'alertAfterS', 0, 86_400);
-  if (has('reminderEveryS')) out.reminderEveryS = num(raw.reminderEveryS, 'reminderEveryS', 0, 604_800);
+  // Judge the resulting (type, target) combination as a whole: on a partial
+  // PATCH either side may come from the stored monitor, and changing only one
+  // of them must not silently orphan the other.
+  const effType = (out.type ?? current?.type) as string | undefined;
+  const effTarget = (out.target ?? current?.target) as string | undefined;
+  if (effType && effTarget) {
+    if (effType === 'http') {
+      let url: URL | null = null;
+      try {
+        url = new URL(effTarget);
+      } catch {
+        url = null;
+      }
+      if (!url || !/^https?:$/.test(url.protocol)) {
+        throw new ValidationError('http monitors need a target starting with http:// or https://');
+      }
+    }
+    if (effType === 'tcp' && !parseHostPort(effTarget)) {
+      throw new ValidationError('tcp monitors need a target in host:port form (port 1-65535)');
+    }
+    if (effType === 'ping' && !SAFE_HOST.test(effTarget)) {
+      throw new ValidationError('ping monitors need a plain hostname or IP (no scheme, no port)');
+    }
+  }
+
+  if (has('intervalS')) out.intervalS = num(raw.intervalS, 'intervalS', LIMITS.intervalS.min, LIMITS.intervalS.max);
+  if (has('timeoutMs')) out.timeoutMs = num(raw.timeoutMs, 'timeoutMs', LIMITS.timeoutMs.min, LIMITS.timeoutMs.max);
+  if (has('retries')) out.retries = num(raw.retries, 'retries', LIMITS.retries.min, LIMITS.retries.max);
+  if (has('alertAfterS')) out.alertAfterS = num(raw.alertAfterS, 'alertAfterS', LIMITS.alertAfterS.min, LIMITS.alertAfterS.max);
+  if (has('reminderEveryS')) {
+    out.reminderEveryS = num(raw.reminderEveryS, 'reminderEveryS', LIMITS.reminderEveryS.min, LIMITS.reminderEveryS.max);
+  }
 
   if (has('acceptedStatus')) {
     const spec = String(raw.acceptedStatus).trim();
@@ -76,9 +115,18 @@ export function validateMonitor(input: unknown, { partial }: { partial: boolean 
     if (raw.headers === null) out.headers = null;
     else if (typeof raw.headers === 'object') {
       const headers: Record<string, string> = {};
-      for (const [k, v] of Object.entries(raw.headers as Record<string, unknown>)) headers[k] = String(v);
+      for (const [k, v] of Object.entries(raw.headers as Record<string, unknown>)) {
+        if (typeof v !== 'string') throw new ValidationError(`header "${k}" must be a string`);
+        headers[k] = v;
+      }
       out.headers = headers;
     } else throw new ValidationError('headers must be an object or null');
+  }
+
+  const method = ((out.method as string | undefined) ?? current?.method ?? 'GET').toUpperCase();
+  const keyword = has('keyword') ? out.keyword : (current?.keyword ?? null);
+  if (method === 'HEAD' && keyword) {
+    throw new ValidationError('keyword is not supported with HEAD requests (they have no body to match)');
   }
 
   return out as Partial<MonitorInput>;

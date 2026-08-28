@@ -5,12 +5,20 @@ import type { CheckResult, Monitor } from '../types.ts';
 export function parseHostPort(target: string): { host: string; port: number } | null {
   const trimmed = target.trim();
   const v6 = /^\[(.+)\]:(\d+)$/.exec(trimmed);
-  if (v6) return { host: v6[1]!, port: Number(v6[2]) };
+  if (v6) {
+    const port = Number(v6[2]);
+    if (!v6[1] || port < 1 || port > 65535) return null;
+    return { host: v6[1]!, port };
+  }
   const idx = trimmed.lastIndexOf(':');
   if (idx <= 0) return null;
   const host = trimmed.slice(0, idx);
-  const port = Number.parseInt(trimmed.slice(idx + 1), 10);
-  if (!host || Number.isNaN(port) || port < 1 || port > 65535) return null;
+  const portStr = trimmed.slice(idx + 1);
+  // Reject anything URL-shaped (schemes, paths, userinfo) so "http://host:80"
+  // is not misread as host "http://host". The port must be all digits.
+  if (!host || /[\/\s@#?]/.test(host) || !/^\d+$/.test(portStr)) return null;
+  const port = Number.parseInt(portStr, 10);
+  if (port < 1 || port > 65535) return null;
   return { host, port };
 }
 
