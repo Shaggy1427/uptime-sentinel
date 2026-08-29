@@ -274,6 +274,8 @@ All configuration is environment variables. See [`.env.example`](.env.example).
 | `TRUST_PROXY` | `false` | Set `true` only behind a reverse proxy you control, so rate limits key on the real client IP |
 | `DATA_DIR` | `/data` (Docker), `./data` otherwise | SQLite database location. The systemd installer sets it to `/var/lib/uptime-sentinel` |
 | `RETENTION_DAYS` | `30` | Individual checks are pruned after this. Incidents are kept forever |
+| `HEARTBEAT_URL` | — | Dead-man's-switch. See [Nothing watches the watcher](#nothing-watches-the-watcher) |
+| `HEARTBEAT_INTERVAL_S` | `60` | How often to ping it |
 | `NTFY_URL` | `https://ntfy.sh` | Point at your own ntfy instance if you self-host |
 | `NTFY_TOPIC` | — | **Required.** Without it, alerts are dropped and the UI warns you |
 | `NTFY_TOKEN` | — | For protected topics |
@@ -363,9 +365,31 @@ a public issue.
   systemd, the unit grants `CAP_NET_RAW` (needed because `NoNewPrivileges`
   disables the setcap bit on `/usr/bin/ping`). If neither is available to you,
   use `tcp` monitors instead — for most services they tell you more anyway.
-- **Nothing watches the watcher.** If the Pi itself dies, you get silence. Pointing
-  a free [healthchecks.io](https://healthchecks.io) check at this container's
-  `/api/health` closes that gap — see [ROADMAP.md](ROADMAP.md).
+## Nothing watches the watcher
+
+Every alert here depends on this process being alive to send it. If the Pi loses
+power or the process wedges, nothing is sent — and silence is indistinguishable
+from "everything is fine". That is the one failure mode where the monitor lies to
+you by saying nothing at all.
+
+Set `HEARTBEAT_URL` to close it. Create a free check at
+[healthchecks.io](https://healthchecks.io) (or use an Uptime Kuma push monitor,
+or anything that alerts on absence), paste its ping URL, and this pings it every
+`HEARTBEAT_INTERVAL_S` seconds. When the pings stop, *that* service tells you.
+
+```bash
+HEARTBEAT_URL=https://hc-ping.com/your-uuid-here
+HEARTBEAT_INTERVAL_S=60
+```
+
+Set the check's grace period a little above your interval — two or three missed
+pings is a good threshold, so a brief network blip does not page you.
+
+It deliberately pings only when the scheduler is actually completing checks. A
+process that is running but has stopped checking anything is still broken, and a
+naive "I am alive" ping would hide exactly that. The withholding threshold scales
+with your slowest monitor's interval, and there is a grace period after startup
+so a restart does not false-alarm.
 
 ## License
 

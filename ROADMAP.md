@@ -42,8 +42,8 @@ good next issues. Each entry notes the files you would touch.
 
 ## Operational
 
-- [ ] **External heartbeat** — ping healthchecks.io on every scheduler pass so you
-      are alerted when the Pi itself dies. Small, high value.
+- [x] **External heartbeat** — done. `HEARTBEAT_URL` pings an external
+      dead-man's-switch, withheld when the check loop stalls.
 - [ ] **Config export / import** — download all monitors as JSON from the UI.
 - [ ] **Backup the database** — a periodic `VACUUM INTO` to a dated file.
 
