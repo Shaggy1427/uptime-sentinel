@@ -288,6 +288,24 @@ export class Scheduler {
     if (removed > 0) console.log(`[prune] removed ${removed} check rows older than ${config.retentionDays}d`);
   }
 
+  /**
+   * Whether the check loop is actually doing work, for the heartbeat to decide
+   * if it has earned the right to say "I am fine". A live process whose
+   * scheduler has stalled is still broken.
+   */
+  health(): { activeMonitors: number; lastCheckAt: number | null; slowestIntervalS: number } {
+    const active = listMonitors().filter((m) => !m.paused);
+
+    let lastCheckAt: number | null = null;
+    for (const state of this.states.values()) {
+      if (state.lastCheckedAt === null) continue;
+      if (lastCheckAt === null || state.lastCheckedAt > lastCheckAt) lastCheckAt = state.lastCheckedAt;
+    }
+
+    const slowestIntervalS = active.reduce((max, m) => Math.max(max, m.intervalS), 0) || 60;
+    return { activeMonitors: active.length, lastCheckAt, slowestIntervalS };
+  }
+
   getState(monitorId: number): RuntimeState | null {
     return this.states.get(monitorId) ?? null;
   }

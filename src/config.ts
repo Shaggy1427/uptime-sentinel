@@ -40,6 +40,14 @@ export const config = {
     upPriority: int('NTFY_UP_PRIORITY', 3, 1, 5),
   },
 
+  heartbeat: {
+    // Outbound dead-man's-switch. Empty disables it.
+    url: str('HEARTBEAT_URL', ''),
+    intervalS: int('HEARTBEAT_INTERVAL_S', 60),
+    method: str('HEARTBEAT_METHOD', 'GET'),
+    timeoutMs: int('HEARTBEAT_TIMEOUT_MS', 10_000),
+  },
+
   defaults: {
     // Same bounds the API enforces in validate.ts, so env defaults can never
     // create monitors the UI would reject (e.g. interval 0 = check hot-loop).

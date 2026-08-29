@@ -62,6 +62,11 @@ Docker build. Run `npm run typecheck && npm test` before pushing.
   readable `error` instead.
 - A notification channel must never throw into the scheduler either. A broken
   notifier must not stop monitoring.
+- **No TypeScript that needs codegen.** Node strips types rather than compiling
+  them, so constructor parameter properties (`constructor(private x: T)`),
+  `enum`, `namespace`, and decorators all fail at runtime even though
+  `tsc --noEmit` accepts them. Typechecking green does not mean it runs -- if
+  you touch class constructors, run `npm test` too.
 - Guard the API against unauthenticated access using the **resolved route**
   (`req.routeOptions.url`), never the raw `req.url` — they disagree on
   percent-encoded paths, which was a real auth bypass.
