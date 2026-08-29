@@ -61,6 +61,12 @@ const MIGRATIONS: string[] = [
   CREATE INDEX idx_incidents_monitor ON incidents(monitor_id, started_at DESC);
   CREATE INDEX idx_incidents_open ON incidents(monitor_id) WHERE resolved_at IS NULL;
   `,
+  // 2: JSON assertion monitors.
+  `
+  ALTER TABLE monitors ADD COLUMN json_path TEXT;
+  ALTER TABLE monitors ADD COLUMN json_operator TEXT;
+  ALTER TABLE monitors ADD COLUMN json_expected TEXT;
+  `,
 ];
 
 function migrate(): void {
@@ -103,6 +109,9 @@ function toMonitor(r: Row): Monitor {
     ignoreTls: Number(r.ignore_tls) === 1,
     method: String(r.method),
     headers: r.headers ? (JSON.parse(String(r.headers)) as Record<string, string>) : null,
+    jsonPath: r.json_path === null || r.json_path === undefined ? null : String(r.json_path),
+    jsonOperator: r.json_operator === null || r.json_operator === undefined ? null : String(r.json_operator),
+    jsonExpected: r.json_expected === null || r.json_expected === undefined ? null : String(r.json_expected),
     paused: Number(r.paused) === 1,
     createdAt: Number(r.created_at),
     updatedAt: Number(r.updated_at),
@@ -154,8 +163,9 @@ export function createMonitor(input: MonitorInput): Monitor {
     .prepare(
       `INSERT INTO monitors
        (name, type, target, interval_s, timeout_ms, retries, alert_after_s, reminder_every_s,
-        accepted_status, keyword, keyword_inverted, ignore_tls, method, headers, paused, created_at, updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        accepted_status, keyword, keyword_inverted, ignore_tls, method, headers,
+        json_path, json_operator, json_expected, paused, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     )
     .run(
       input.name,
@@ -172,6 +182,9 @@ export function createMonitor(input: MonitorInput): Monitor {
       bool(input.ignoreTls ?? false),
       input.method ?? 'GET',
       input.headers ? JSON.stringify(input.headers) : null,
+      input.jsonPath ?? null,
+      input.jsonOperator ?? null,
+      input.jsonExpected ?? null,
       bool(input.paused ?? false),
       now,
       now,
@@ -194,6 +207,9 @@ const UPDATABLE: Record<string, string> = {
   ignoreTls: 'ignore_tls',
   method: 'method',
   headers: 'headers',
+  jsonPath: 'json_path',
+  jsonOperator: 'json_operator',
+  jsonExpected: 'json_expected',
   paused: 'paused',
 };
 

@@ -1,6 +1,7 @@
 import { httpCheck } from './http.ts';
 import { tcpCheck } from './tcp.ts';
 import { pingCheck } from './ping.ts';
+import { jsonCheck } from './json.ts';
 import type { CheckResult, Monitor } from '../types.ts';
 
 export async function runCheck(monitor: Monitor): Promise<CheckResult> {
@@ -12,6 +13,8 @@ export async function runCheck(monitor: Monitor): Promise<CheckResult> {
         return await tcpCheck(monitor);
       case 'ping':
         return await pingCheck(monitor);
+      case 'json':
+        return await jsonCheck(monitor);
       default:
         return { ok: false, statusCode: null, latencyMs: null, error: `Unknown monitor type "${monitor.type}"` };
     }

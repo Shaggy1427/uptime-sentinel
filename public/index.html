@@ -54,6 +54,7 @@
             <option value="http">HTTP(S)</option>
             <option value="tcp">TCP port</option>
             <option value="ping">Ping (ICMP)</option>
+            <option value="json">JSON assertion</option>
           </select>
         </label>
 
@@ -74,6 +75,34 @@
           <input name="reminderEveryS" type="number" min="0" max="604800" value="1800" />
           <small>0 = no reminders</small>
         </label>
+
+        <fieldset class="json-only wide">
+          <legend>JSON assertion</legend>
+          <div class="fields">
+            <label class="wide">Path into the response
+              <input name="jsonPath" placeholder="array.state" />
+              <small>Dotted path. <code>disks[0].health</code> for one item, <code>disks[*].health</code> for every item.</small>
+            </label>
+            <label>Condition
+              <select name="jsonOperator">
+                <option value="eq">equals</option>
+                <option value="ne">does not equal</option>
+                <option value="contains">contains</option>
+                <option value="not_contains">does not contain</option>
+                <option value="gt">is greater than</option>
+                <option value="gte">is at least</option>
+                <option value="lt">is less than</option>
+                <option value="lte">is at most</option>
+                <option value="exists">exists</option>
+                <option value="not_exists">is absent</option>
+              </select>
+            </label>
+            <label id="field-json-expected">Expected value
+              <input name="jsonExpected" placeholder="STARTED" />
+              <small>With <code>[*]</code>, must hold for every match.</small>
+            </label>
+          </div>
+        </fieldset>
 
         <fieldset class="http-only wide">
           <legend>HTTP options</legend>

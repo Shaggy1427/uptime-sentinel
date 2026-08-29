@@ -1,8 +1,10 @@
 import { SAFE_HOST } from './checks/ping.ts';
 import { parseHostPort } from './checks/tcp.ts';
+import { OPERATORS, isOperator } from './checks/assert.ts';
+import { parsePath, PathError } from './checks/jsonpath.ts';
 import type { Monitor, MonitorInput, MonitorType } from './types.ts';
 
-const TYPES: MonitorType[] = ['http', 'tcp', 'ping'];
+const TYPES: MonitorType[] = ['http', 'tcp', 'ping', 'json'];
 const METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'];
 
 /** Bounds shared by the API (validate) and the env defaults (config). */
@@ -26,7 +28,7 @@ function num(value: unknown, field: string, min: number, max: number): number {
 export interface ValidateOptions {
   partial: boolean;
   /** The stored monitor on PATCH, so fields can be validated in combination. */
-  current?: Pick<Monitor, 'type' | 'method' | 'keyword' | 'target'>;
+  current?: Pick<Monitor, 'type' | 'method' | 'keyword' | 'target' | 'jsonPath' | 'jsonOperator' | 'jsonExpected'>;
 }
 
 /** Shared shape validation for create (strict) and patch (partial). */
@@ -124,6 +126,50 @@ export function validateMonitor(input: unknown, { partial, current }: ValidateOp
   }
 
   const method = ((out.method as string | undefined) ?? current?.method ?? 'GET').toUpperCase();
+  if (has('jsonPath')) {
+    const value = raw.jsonPath === null ? null : String(raw.jsonPath).trim();
+    if (value) {
+      if (value.length > 300) throw new ValidationError('jsonPath must be 300 characters or fewer');
+      // Reject a malformed path at write time rather than letting every check
+      // fail later with the same parse error.
+      try {
+        parsePath(value);
+      } catch (err) {
+        if (err instanceof PathError) throw new ValidationError(`jsonPath is invalid: ${err.message}`);
+        throw err;
+      }
+    }
+    out.jsonPath = value || null;
+  }
+
+  if (has('jsonOperator')) {
+    const value = raw.jsonOperator === null ? null : String(raw.jsonOperator).trim();
+    if (value && !isOperator(value)) {
+      throw new ValidationError(`jsonOperator must be one of ${OPERATORS.join(', ')}`);
+    }
+    out.jsonOperator = value || null;
+  }
+
+  if (has('jsonExpected')) {
+    const value = raw.jsonExpected === null ? '' : String(raw.jsonExpected);
+    out.jsonExpected = value.length > 0 ? value.slice(0, 500) : null;
+  }
+
+  // A json monitor is useless without a path, so require the pair to be
+  // coherent whether it arrived whole or as a patch onto a stored monitor.
+  const effectiveType = (out.type ?? current?.type) as string | undefined;
+  if (effectiveType === 'json') {
+    const jsonPath = has('jsonPath') ? out.jsonPath : (current?.jsonPath ?? null);
+    if (!jsonPath) throw new ValidationError('json monitors need a jsonPath, e.g. "array.state"');
+
+    const operator = (has('jsonOperator') ? out.jsonOperator : current?.jsonOperator) ?? 'exists';
+    const expected = has('jsonExpected') ? out.jsonExpected : (current?.jsonExpected ?? null);
+    if (operator !== 'exists' && operator !== 'not_exists' && (expected === null || expected === '')) {
+      throw new ValidationError(`jsonExpected is required when jsonOperator is "${operator}"`);
+    }
+    if (!has('jsonOperator') && !current?.jsonOperator) out.jsonOperator = 'exists';
+  }
+
   const keyword = has('keyword') ? out.keyword : (current?.keyword ?? null);
   if (method === 'HEAD' && keyword) {
     throw new ValidationError('keyword is not supported with HEAD requests (they have no body to match)');

@@ -230,16 +230,28 @@ function renderIncidents(incidents) {
 
 // ------------------------------------------------------------------ editor
 
+const NO_VALUE_OPERATORS = new Set(['exists', 'not_exists']);
+
 const HINTS = {
   http: 'Full URL including scheme, e.g. http://192.168.1.10/login',
   tcp: 'host:port, e.g. 192.168.1.10:445',
   ping: 'Hostname or IP, e.g. 192.168.1.10',
+  json: 'Full URL of an endpoint returning JSON, e.g. http://192.168.1.10/api/health',
 };
 
 function syncEditorType() {
   const type = $('#editor-form').elements.type.value;
   $('#target-hint').textContent = HINTS[type];
   for (const node of document.querySelectorAll('.http-only')) node.classList.toggle('hidden', type !== 'http');
+  for (const node of document.querySelectorAll('.json-only')) node.classList.toggle('hidden', type !== 'json');
+  syncJsonOperator();
+}
+
+/** "exists" and "is absent" take no value, so hide the box rather than ignoring it. */
+function syncJsonOperator() {
+  const form = $('#editor-form');
+  const needsValue = !NO_VALUE_OPERATORS.has(form.elements.jsonOperator.value);
+  $('#field-json-expected').classList.toggle('hidden', !needsValue);
 }
 
 function openEditor(monitor) {
@@ -250,7 +262,7 @@ function openEditor(monitor) {
   $('#editor-error').classList.add('hidden');
 
   if (monitor) {
-    for (const key of ['name', 'type', 'target', 'intervalS', 'timeoutMs', 'retries', 'alertAfterS', 'reminderEveryS', 'method', 'acceptedStatus']) {
+    for (const key of ['name', 'type', 'target', 'intervalS', 'timeoutMs', 'retries', 'alertAfterS', 'reminderEveryS', 'method', 'acceptedStatus', 'jsonPath', 'jsonOperator', 'jsonExpected']) {
       if (form.elements[key]) form.elements[key].value = monitor[key] ?? '';
     }
     form.elements.keyword.value = monitor.keyword ?? '';
@@ -279,7 +291,18 @@ async function saveEditor(event) {
     keyword: f.keyword.value.trim() || null,
     keywordInverted: f.keywordInverted.checked,
     ignoreTls: f.ignoreTls.checked,
+    jsonPath: f.jsonPath.value.trim() || null,
+    jsonOperator: f.jsonOperator.value,
+    jsonExpected: f.jsonExpected.value.trim() || null,
   };
+
+  // Only a json monitor carries these; sending them for other types would
+  // trip the validator's coherence check.
+  if (payload.type !== 'json') {
+    payload.jsonPath = null;
+    payload.jsonOperator = null;
+    payload.jsonExpected = null;
+  }
 
   try {
     if (editingId) await api(`/api/monitors/${editingId}`, { method: 'PATCH', body: JSON.stringify(payload) });
@@ -340,6 +363,7 @@ $('#btn-add').onclick = () => openEditor(null);
 $('#editor-cancel').onclick = () => $('#editor').close();
 $('#editor-form').addEventListener('submit', saveEditor);
 $('#editor-form').elements.type.addEventListener('change', syncEditorType);
+$('#editor-form').elements.jsonOperator.addEventListener('change', syncJsonOperator);
 $('#login-form').addEventListener('submit', submitLogin);
 
 $('#btn-test').onclick = async () => {
