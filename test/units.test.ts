@@ -85,6 +85,25 @@ test('validateMonitor in partial mode allows a single field', () => {
   assert.deepEqual(validateMonitor({ paused: true }, { partial: true }), { paused: true });
 });
 
+test('numeric fields reject trailing garbage and non-integers', () => {
+  const bad = [
+    { intervalS: '60abc' },
+    { intervalS: '30.9' },
+    { intervalS: 30.9 },
+    { retries: 1.5 },
+    { timeoutMs: 'soon' },
+    { alertAfterS: Number.POSITIVE_INFINITY },
+    { reminderEveryS: '' },
+  ];
+  for (const patch of bad) {
+    assert.throws(() => validateMonitor(patch, { partial: true }), ValidationError, `${JSON.stringify(patch)} should be rejected`);
+  }
+
+  // Canonical integers, as numbers or as digit strings, still pass.
+  assert.equal(validateMonitor({ intervalS: 45 }, { partial: true }).intervalS, 45);
+  assert.equal(validateMonitor({ intervalS: '45' }, { partial: true }).intervalS, 45);
+});
+
 test('validateMonitor rejects keyword with HEAD and non-string header values', () => {
   assert.throws(
     () =>
