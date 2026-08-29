@@ -10,12 +10,19 @@ import * as store from './db.ts';
 import { scheduler } from './scheduler.ts';
 import { dispatch } from './notify/index.ts';
 import { validateMonitor, ValidationError } from './validate.ts';
+import type { ValidateOptions } from './validate.ts';
 import { cookieSecret, secretEquals } from './secret.ts';
 import type { Monitor } from './types.ts';
 
 const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 
 const DAY = 86_400_000;
+
+/** Dependency-graph access handed to the validator; see ValidateOptions.graph. */
+const GRAPH: NonNullable<ValidateOptions['graph']> = {
+  exists: (id) => store.getMonitor(id) !== null,
+  wouldCreateCycle: (selfId, parentId) => store.wouldCreateCycle(selfId, parentId),
+};
 const AUTH_COOKIE = 'sentinel_auth';
 const OPEN_ROUTES = new Set(['/api/health', '/api/login', '/api/auth']);
 
@@ -61,9 +68,17 @@ function describe(monitor: Monitor) {
     checkedAt: c.checkedAt,
   }));
 
+  const parent = monitor.parentId === null ? null : store.getMonitor(monitor.parentId);
+  const blockedById = state?.suppressedBy ?? null;
+
   return {
     ...redact(monitor),
     status: monitor.paused ? 'paused' : (state?.status ?? 'pending'),
+    parentName: parent?.name ?? null,
+    // Named so the dashboard can say what a monitor is waiting on rather than
+    // just showing it greyed out for no visible reason.
+    suppressedBy: blockedById === null ? null : (store.getMonitor(blockedById)?.name ?? null),
+    dependentCount: store.descendantsOf(monitor.id).filter((m) => !m.paused).length,
     lastResult: state?.lastResult ?? null,
     lastCheckedAt: state?.lastCheckedAt ?? store.lastCheck(monitor.id)?.checkedAt ?? null,
     nextCheckAt: state?.nextCheckAt ?? null,
@@ -183,11 +198,13 @@ export async function buildServer() {
   app.get('/api/health', async () => {
     const monitors = store.listMonitors();
     const down = monitors.filter((m) => !m.paused && scheduler.getState(m.id)?.status === 'down');
+    const suppressed = monitors.filter((m) => !m.paused && scheduler.getState(m.id)?.status === 'suppressed');
     return {
       ok: true,
       version: '0.1.0',
       monitors: monitors.length,
       down: down.length,
+      suppressed: suppressed.length,
       uptimeS: Math.round(process.uptime()),
     };
   });
@@ -211,7 +228,7 @@ export async function buildServer() {
   });
 
   app.post('/api/monitors', async (req, reply) => {
-    const input = validateMonitor(req.body, { partial: false });
+    const input = validateMonitor(req.body, { partial: false, graph: GRAPH });
     const monitor = store.createMonitor(input as Parameters<typeof store.createMonitor>[0]);
     scheduler.sync();
     return reply.code(201).send(redact(monitor));
@@ -224,7 +241,7 @@ export async function buildServer() {
     if (!existing) return reply.code(404).send({ error: 'Monitor not found' });
     // Pass the stored monitor so the patch is validated in combination with
     // it (e.g. a new type is checked against the existing target).
-    const patch = validateMonitor(req.body, { partial: true, current: existing });
+    const patch = validateMonitor(req.body, { partial: true, current: existing, graph: GRAPH });
     const monitor = store.updateMonitor(id, patch);
     scheduler.sync();
     return monitor ? redact(monitor) : monitor;
@@ -306,6 +323,7 @@ export async function buildServer() {
       jsonPath: null,
       jsonOperator: null,
       jsonExpected: null,
+      parentId: null,
       paused: false,
       createdAt: Date.now(),
       updatedAt: Date.now(),

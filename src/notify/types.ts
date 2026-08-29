@@ -11,6 +11,11 @@ export interface NotificationEvent {
   /** How long the monitor has been down (ms). Null for 'test'. */
   downForMs: number | null;
   at: number;
+  /**
+   * Monitors that sit behind this one and are therefore not being checked.
+   * Lets one alert stand in for the storm it replaces.
+   */
+  suppressed?: string[];
 }
 
 export interface Channel {

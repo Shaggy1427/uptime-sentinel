@@ -116,7 +116,9 @@ test('health stays open but exposes only counts', async () => {
   assert.equal(res.statusCode, 200);
   assert.ok(!res.body.includes('INTERNAL-ONLY'));
   assert.ok(!res.body.includes('10.0.0.5'));
-  assert.deepEqual(Object.keys(res.json()).sort(), ['down', 'monitors', 'ok', 'uptimeS', 'version']);
+  // Intentionally strict: this endpoint is unauthenticated, so every new key
+  // has to be looked at. Counts are fine; targets and configuration are not.
+  assert.deepEqual(Object.keys(res.json()).sort(), ['down', 'monitors', 'ok', 'suppressed', 'uptimeS', 'version']);
 });
 
 test('the cookie signing key is random, not derived from the password', async () => {
@@ -125,4 +127,17 @@ test('the cookie signing key is random, not derived from the password', async ()
   assert.ok(secret.length >= 32);
   assert.ok(!secret.includes('correct-horse'));
   assert.equal(fs.statSync(secretFile).mode & 0o777, 0o600);
+});
+
+test('header names cannot reach the prototype, and values cannot inject a line', async () => {
+  const { validateMonitor, ValidationError } = await import('../src/validate.ts');
+  const base = { name: 'h', type: 'http' as const, target: 'http://example.invalid/' };
+
+  // "__proto__" is a legal HTTP token, so a name check alone would let it through.
+  const ok = validateMonitor({ ...base, headers: { __proto__: 'x', 'X-Api-Key': 'k' } }, { partial: false });
+  assert.equal(({} as Record<string, unknown>).x, undefined, 'Object.prototype must be untouched');
+  assert.equal(Object.getPrototypeOf(ok.headers), null, 'stored headers must have no prototype');
+
+  assert.throws(() => validateMonitor({ ...base, headers: { 'Bad Name': 'v' } }, { partial: false }), ValidationError);
+  assert.throws(() => validateMonitor({ ...base, headers: { 'X-A': 'v\r\nX-Injected: 1' } }, { partial: false }), ValidationError);
 });

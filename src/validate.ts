@@ -7,6 +7,9 @@ import type { Monitor, MonitorInput, MonitorType } from './types.ts';
 const TYPES: MonitorType[] = ['http', 'tcp', 'ping', 'json'];
 const METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'];
 
+/** RFC 7230 token characters -- the only thing legal in an HTTP header name. */
+const HEADER_NAME = /^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$/;
+
 /** Bounds shared by the API (validate) and the env defaults (config). */
 export const LIMITS = {
   intervalS: { min: 5, max: 86_400 },
@@ -39,11 +42,25 @@ function num(value: unknown, field: string, min: number, max: number): number {
 export interface ValidateOptions {
   partial: boolean;
   /** The stored monitor on PATCH, so fields can be validated in combination. */
-  current?: Pick<Monitor, 'type' | 'method' | 'keyword' | 'target' | 'jsonPath' | 'jsonOperator' | 'jsonExpected'>;
+  current?: Pick<
+    Monitor,
+    'type' | 'method' | 'keyword' | 'target' | 'jsonPath' | 'jsonOperator' | 'jsonExpected'
+  > & { id?: number };
+  /**
+   * Dependency graph access, injected rather than imported.
+   *
+   * config.ts imports LIMITS from this module, so importing db.ts here would
+   * close a cycle (config -> validate -> db -> config) that fails at load.
+   * Injection also keeps this module pure and testable.
+   */
+  graph?: {
+    exists(id: number): boolean;
+    wouldCreateCycle(selfId: number, parentId: number): boolean;
+  };
 }
 
 /** Shared shape validation for create (strict) and patch (partial). */
-export function validateMonitor(input: unknown, { partial, current }: ValidateOptions): Partial<MonitorInput> {
+export function validateMonitor(input: unknown, { partial, current, graph }: ValidateOptions): Partial<MonitorInput> {
   if (typeof input !== 'object' || input === null) throw new ValidationError('Body must be an object');
   const raw = input as Record<string, unknown>;
   const out: Record<string, unknown> = {};
@@ -127,9 +144,15 @@ export function validateMonitor(input: unknown, { partial, current }: ValidateOp
   if (has('headers')) {
     if (raw.headers === null) out.headers = null;
     else if (typeof raw.headers === 'object') {
-      const headers: Record<string, string> = {};
+      // Null-prototype: header names come from the request, and "__proto__" is
+      // a perfectly legal HTTP token, so a plain object literal would be
+      // writable through its prototype.
+      const headers: Record<string, string> = Object.create(null);
       for (const [k, v] of Object.entries(raw.headers as Record<string, unknown>)) {
+        if (!HEADER_NAME.test(k)) throw new ValidationError(`"${k}" is not a valid HTTP header name`);
         if (typeof v !== 'string') throw new ValidationError(`header "${k}" must be a string`);
+        // A newline in a value would let one header inject another.
+        if (/[\r\n]/.test(v)) throw new ValidationError(`header "${k}" must not contain a line break`);
         headers[k] = v;
       }
       out.headers = headers;
@@ -179,6 +202,28 @@ export function validateMonitor(input: unknown, { partial, current }: ValidateOp
       throw new ValidationError(`jsonExpected is required when jsonOperator is "${operator}"`);
     }
     if (!has('jsonOperator') && !current?.jsonOperator) out.jsonOperator = 'exists';
+  }
+
+  if (has('parentId')) {
+    if (raw.parentId === null || raw.parentId === '') {
+      out.parentId = null;
+    } else {
+      const parentId = num(raw.parentId, 'parentId', 1, Number.MAX_SAFE_INTEGER);
+      if (graph && !graph.exists(parentId)) {
+        throw new ValidationError(`No monitor with id ${parentId} to depend on`);
+      }
+
+      const selfId = current?.id;
+      if (selfId !== undefined) {
+        // A cycle would make every monitor in the loop permanently suppress the
+        // next, so nothing in it would ever be checked again.
+        if (selfId === parentId) throw new ValidationError('A monitor cannot depend on itself');
+        if (graph?.wouldCreateCycle(selfId, parentId)) {
+          throw new ValidationError('That dependency would create a loop');
+        }
+      }
+      out.parentId = parentId;
+    }
   }
 
   const keyword = has('keyword') ? out.keyword : (current?.keyword ?? null);
