@@ -230,6 +230,32 @@ only runs against an empty database — after that, the UI is the source of trut
 | `http` | `http://192.168.1.10/login` | Web UIs, APIs, anything with a health endpoint |
 | `tcp` | `192.168.1.10:445` | SMB, SSH, databases, game servers |
 | `ping` | `192.168.1.10` | Is the box on the network at all |
+| `json` | `http://192.168.1.10/api/health` | Assert on a value *inside* a JSON response |
+
+### JSON assertions
+
+"Responds to HTTP" is not "healthy". An Unraid box serves its web UI perfectly
+while the array is degraded, and plenty of services return `200` from a health
+endpoint whose body says otherwise. A `json` monitor reads a value out of the
+response and asserts on it:
+
+| Field | Example | Meaning |
+|-------|---------|---------|
+| Path | `array.state` | Dotted path into the JSON |
+| Condition | `equals` | eq, ne, contains, not_contains, gt, gte, lt, lte, exists, is absent |
+| Expected | `STARTED` | Value to compare against (not needed for exists/absent) |
+
+Paths take `disks[0].health` for one item and `disks[*].health` for every item.
+**With `[*]` the condition must hold for every match** — so
+`disks[*].health does not equal FAILING` means *no* disk is failing, and one
+healthy disk cannot mask a failing one.
+
+This is stricter than the keyword match an `http` monitor offers, which cannot
+tell `"state": "STARTED"` from `"previous_state": "STARTED"`.
+
+The assertion is stored as data — path, operator, value — and evaluated without
+`eval` or any expression language, because monitor configuration is reachable by
+anyone who can use the API.
 
 HTTP monitors additionally support a method, custom accepted status codes
 (`200-299,302`), a **keyword** the body must contain (catches "server is up but

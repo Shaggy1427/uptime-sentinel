@@ -1,10 +1,10 @@
-export type MonitorType = 'http' | 'tcp' | 'ping';
+export type MonitorType = 'http' | 'tcp' | 'ping' | 'json';
 
 export interface Monitor {
   id: number;
   name: string;
   type: MonitorType;
-  /** http: full URL. tcp: "host:port". ping: hostname or IP. */
+  /** http/json: full URL. tcp: "host:port". ping: hostname or IP. */
   target: string;
   intervalS: number;
   timeoutMs: number;
@@ -21,6 +21,12 @@ export interface Monitor {
   ignoreTls: boolean;
   method: string;
   headers: Record<string, string> | null;
+  /** json only: dotted path into the response, e.g. "array.state" or "disks[*].health". */
+  jsonPath: string | null;
+  /** json only: comparison operator, see checks/assert.ts. */
+  jsonOperator: string | null;
+  /** json only: value the operator compares against, as text. */
+  jsonExpected: string | null;
   paused: boolean;
   createdAt: number;
   updatedAt: number;

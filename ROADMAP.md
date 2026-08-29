@@ -21,13 +21,15 @@ good next issues. Each entry notes the files you would touch.
       on this list once you have more than ~5 monitors.
 - [ ] **TLS certificate expiry** — warn N days before a cert expires.
 - [ ] **DNS record monitor** — assert a hostname resolves to an expected address.
-- [ ] **JSON body assertions** — check `$.status == "healthy"` rather than a
-      substring match.
+- [x] **JSON body assertions** — done. A `json` monitor type asserts on a path
+      into the response, with `[*]` requiring the condition to hold for every
+      match.
 - [ ] **Docker container health** — if you later run this *on* Unraid, mount the
       Docker socket and check container state directly. Note the security tradeoff:
       socket access is root-equivalent on the host.
-- [ ] **Disk / SMART / array status** — scrape the Unraid API or a Prometheus
-      exporter for "array is degraded", not just "server responds".
+- [ ] **Disk / SMART / array status** — largely reachable now via a `json`
+      monitor against the Unraid API. A first-class integration would still be
+      nicer: discovery, and sensible default assertions out of the box.
 
 ## Product
 
