@@ -111,5 +111,7 @@ test('validateMonitor rejects keyword with HEAD and non-string header values', (
     { name: 'x', type: 'http', target: 'http://tower', headers: { a: 'b' } },
     { partial: false },
   );
-  assert.deepEqual(ok.headers, { a: 'b' });
+  // Spread to compare contents: validated headers now carry a null prototype
+  // deliberately, so they are not deep-equal to a plain object literal.
+  assert.deepEqual({ ...ok.headers }, { a: 'b' });
 });
