@@ -58,7 +58,13 @@ function parseId(value: string | undefined): number | null {
   return Number.isSafeInteger(n) && n > 0 ? n : null;
 }
 
-function describe(monitor: Monitor) {
+function describe(monitor: Monitor, all?: Monitor[]) {
+  // `all` lets /api/status resolve parent names and descendant counts against a
+  // single monitor list instead of one listMonitors() (a full table scan) per
+  // monitor -- otherwise describing N monitors is O(N^2) scans on every 10s poll.
+  const monitors = all ?? store.listMonitors();
+  const byId = new Map(monitors.map((m) => [m.id, m]));
+
   const state = scheduler.getState(monitor.id);
   const now = Date.now();
   const incident = monitor.paused ? null : store.openIncidentFor(monitor.id);
@@ -68,7 +74,7 @@ function describe(monitor: Monitor) {
     checkedAt: c.checkedAt,
   }));
 
-  const parent = monitor.parentId === null ? null : store.getMonitor(monitor.parentId);
+  const parent = monitor.parentId === null ? null : (byId.get(monitor.parentId) ?? null);
   const blockedById = state?.suppressedBy ?? null;
 
   return {
@@ -77,8 +83,8 @@ function describe(monitor: Monitor) {
     parentName: parent?.name ?? null,
     // Named so the dashboard can say what a monitor is waiting on rather than
     // just showing it greyed out for no visible reason.
-    suppressedBy: blockedById === null ? null : (store.getMonitor(blockedById)?.name ?? null),
-    dependentCount: store.descendantsOf(monitor.id).filter((m) => !m.paused).length,
+    suppressedBy: blockedById === null ? null : (byId.get(blockedById)?.name ?? null),
+    dependentCount: store.descendantsOf(monitor.id, monitors).filter((m) => !m.paused).length,
     lastResult: state?.lastResult ?? null,
     lastCheckedAt: state?.lastCheckedAt ?? store.lastCheck(monitor.id)?.checkedAt ?? null,
     nextCheckAt: state?.nextCheckAt ?? null,
@@ -211,11 +217,14 @@ export async function buildServer() {
 
   // -------------------------------------------------------------- monitors
 
-  app.get('/api/status', async () => ({
-    generatedAt: Date.now(),
-    notificationsConfigured: config.ntfy.topic !== '',
-    monitors: store.listMonitors().map(describe),
-  }));
+  app.get('/api/status', async () => {
+    const all = store.listMonitors();
+    return {
+      generatedAt: Date.now(),
+      notificationsConfigured: config.ntfy.topic !== '',
+      monitors: all.map((m) => describe(m, all)),
+    };
+  });
 
   app.get('/api/monitors', async () => store.listMonitors().map(redact));
 
