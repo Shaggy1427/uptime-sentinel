@@ -163,37 +163,40 @@ export class Scheduler {
     if (state.inFlight) return state.lastResult ?? { ok: false, statusCode: null, latencyMs: null, error: 'busy' };
     state.inFlight = true;
 
-    let result: CheckResult;
+    // Held until incident/alert handling is done, not just until the check
+    // returns. Releasing it after `runCheck` alone left a window during the
+    // (awaited, network-bound) dispatch in which a concurrent runNow could
+    // start a second pass -- two insertCheck rows, a double-bumped failure
+    // streak, and in the worst case two incidents / two alerts for one event.
     try {
-      result = await runCheck(monitor);
+      const result = await runCheck(monitor);
+      const now = Date.now();
+
+      // The monitor may have been deleted while the check was in flight;
+      // persisting would then violate the foreign key constraint. The result
+      // is still returned to the caller (e.g. runNow).
+      const current = getMonitor(monitor.id);
+      if (!current) return result;
+
+      try {
+        insertCheck(current.id, result, now);
+        state.lastResult = result;
+        state.lastCheckedAt = now;
+
+        // Paused while the check was running: record the result, but treat the
+        // monitor as inert and do not open/resolve incidents or send alerts.
+        if (current.paused) return result;
+
+        if (result.ok) await this.handleUp(current, state, now);
+        else await this.handleDown(current, state, result, now);
+      } catch (err) {
+        console.error(`[scheduler] post-check handling failed for "${current.name}":`, err);
+      }
+
+      return result;
     } finally {
       state.inFlight = false;
     }
-
-    const now = Date.now();
-
-    // The monitor may have been deleted while the check was in flight;
-    // persisting would then violate the foreign key constraint. The result
-    // is still returned to the caller (e.g. runNow).
-    const current = getMonitor(monitor.id);
-    if (!current) return result;
-
-    try {
-      insertCheck(current.id, result, now);
-      state.lastResult = result;
-      state.lastCheckedAt = now;
-
-      // Paused while the check was running: record the result, but treat the
-      // monitor as inert and do not open/resolve incidents or send alerts.
-      if (current.paused) return result;
-
-      if (result.ok) await this.handleUp(current, state, now);
-      else await this.handleDown(current, state, result, now);
-    } catch (err) {
-      console.error(`[scheduler] post-check handling failed for "${current.name}":`, err);
-    }
-
-    return result;
   }
 
   private async handleUp(monitor: Monitor, state: RuntimeState, now: number): Promise<void> {
@@ -203,19 +206,34 @@ export class Scheduler {
     state.status = 'up';
 
     if (!incident) return;
-    resolveIncident(incident.id, now);
 
-    // Only announce recovery if we actually announced the outage. A blip that
-    // resolved before alert_after_s stays silent in both directions.
-    if (incident.alertedAt !== null) {
-      await dispatch({
-        kind: 'up',
-        monitor,
-        incident: { ...incident, resolvedAt: now },
-        reason: null,
-        downForMs: now - incident.startedAt,
-        at: now,
-      });
+    // The outage was never announced (a blip that resolved before
+    // alert_after_s), so there is nothing to announce now -- close it quietly.
+    if (incident.alertedAt === null) {
+      resolveIncident(incident.id, now);
+      return;
+    }
+
+    const results = await dispatch({
+      kind: 'up',
+      monitor,
+      incident: { ...incident, resolvedAt: now },
+      reason: null,
+      downForMs: now - incident.startedAt,
+      at: now,
+    });
+
+    // Mirror the DOWN path: only close the incident once the RECOVERED alert
+    // has actually gone out somewhere. If every configured channel failed,
+    // leave it open so the next successful check retries -- otherwise a
+    // transient ntfy outage leaves the operator's last signal reading "DOWN"
+    // for a service that is fine, with no reminder to correct it.
+    if (results.length === 0 || results.some((r) => r.ok)) {
+      resolveIncident(incident.id, now);
+    } else {
+      console.warn(
+        `[scheduler] RECOVERED alert for "${monitor.name}" was not delivered; retrying on next check`,
+      );
     }
   }
 
