@@ -7,6 +7,9 @@ import type { Monitor, MonitorInput, MonitorType } from './types.ts';
 const TYPES: MonitorType[] = ['http', 'tcp', 'ping', 'json'];
 const METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'];
 
+/** RFC 7230 token characters -- the only thing legal in an HTTP header name. */
+const HEADER_NAME = /^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$/;
+
 /** Bounds shared by the API (validate) and the env defaults (config). */
 export const LIMITS = {
   intervalS: { min: 5, max: 86_400 },
@@ -141,9 +144,15 @@ export function validateMonitor(input: unknown, { partial, current, graph }: Val
   if (has('headers')) {
     if (raw.headers === null) out.headers = null;
     else if (typeof raw.headers === 'object') {
-      const headers: Record<string, string> = {};
+      // Null-prototype: header names come from the request, and "__proto__" is
+      // a perfectly legal HTTP token, so a plain object literal would be
+      // writable through its prototype.
+      const headers: Record<string, string> = Object.create(null);
       for (const [k, v] of Object.entries(raw.headers as Record<string, unknown>)) {
+        if (!HEADER_NAME.test(k)) throw new ValidationError(`"${k}" is not a valid HTTP header name`);
         if (typeof v !== 'string') throw new ValidationError(`header "${k}" must be a string`);
+        // A newline in a value would let one header inject another.
+        if (/[\r\n]/.test(v)) throw new ValidationError(`header "${k}" must not contain a line break`);
         headers[k] = v;
       }
       out.headers = headers;
