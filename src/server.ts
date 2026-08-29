@@ -39,6 +39,18 @@ function clampLimit(value: string | undefined, fallback: number, max: number): n
   return Math.min(n, max);
 }
 
+/**
+ * Parse a resource id from a route param or query string. Returns null for
+ * anything that is not a plain positive integer, so `/api/monitors/abc/checks`
+ * is a 400 rather than a silent `[]` (Number('abc') is NaN, which binds and
+ * matches nothing).
+ */
+function parseId(value: string | undefined): number | null {
+  if (value === undefined || !/^\d+$/.test(value)) return null;
+  const n = Number(value);
+  return Number.isSafeInteger(n) && n > 0 ? n : null;
+}
+
 function describe(monitor: Monitor) {
   const state = scheduler.getState(monitor.id);
   const now = Date.now();
@@ -191,7 +203,9 @@ export async function buildServer() {
   app.get('/api/monitors', async () => store.listMonitors().map(redact));
 
   app.get<{ Params: { id: string } }>('/api/monitors/:id', async (req, reply) => {
-    const monitor = store.getMonitor(Number(req.params.id));
+    const id = parseId(req.params.id);
+    if (id === null) return reply.code(400).send({ error: 'Invalid monitor id' });
+    const monitor = store.getMonitor(id);
     if (!monitor) return reply.code(404).send({ error: 'Monitor not found' });
     return describe(monitor);
   });
@@ -204,7 +218,8 @@ export async function buildServer() {
   });
 
   app.patch<{ Params: { id: string } }>('/api/monitors/:id', async (req, reply) => {
-    const id = Number(req.params.id);
+    const id = parseId(req.params.id);
+    if (id === null) return reply.code(400).send({ error: 'Invalid monitor id' });
     const existing = store.getMonitor(id);
     if (!existing) return reply.code(404).send({ error: 'Monitor not found' });
     // Pass the stored monitor so the patch is validated in combination with
@@ -216,7 +231,9 @@ export async function buildServer() {
   });
 
   app.delete<{ Params: { id: string } }>('/api/monitors/:id', async (req, reply) => {
-    const removed = store.deleteMonitor(Number(req.params.id));
+    const id = parseId(req.params.id);
+    if (id === null) return reply.code(400).send({ error: 'Invalid monitor id' });
+    const removed = store.deleteMonitor(id);
     if (!removed) return reply.code(404).send({ error: 'Monitor not found' });
     scheduler.sync();
     return reply.code(204).send();
@@ -228,7 +245,9 @@ export async function buildServer() {
     '/api/monitors/:id/check',
     { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } },
     async (req, reply) => {
-      const monitor = store.getMonitor(Number(req.params.id));
+      const id = parseId(req.params.id);
+      if (id === null) return reply.code(400).send({ error: 'Invalid monitor id' });
+      const monitor = store.getMonitor(id);
       if (!monitor) return reply.code(404).send({ error: 'Monitor not found' });
       if (monitor.paused) return reply.code(409).send({ error: 'Monitor is paused' });
       const result = await scheduler.runNow(monitor.id);
@@ -239,14 +258,23 @@ export async function buildServer() {
 
   app.get<{ Params: { id: string }; Querystring: { limit?: string } }>(
     '/api/monitors/:id/checks',
-    async (req) => store.recentChecks(Number(req.params.id), clampLimit(req.query.limit, 200, 1000)),
+    async (req, reply) => {
+      const id = parseId(req.params.id);
+      if (id === null) return reply.code(400).send({ error: 'Invalid monitor id' });
+      return store.recentChecks(id, clampLimit(req.query.limit, 200, 1000));
+    },
   );
 
   // ------------------------------------------------------------- incidents
 
-  app.get<{ Querystring: { limit?: string; monitorId?: string } }>('/api/incidents', async (req) => {
+  app.get<{ Querystring: { limit?: string; monitorId?: string } }>('/api/incidents', async (req, reply) => {
     const limit = clampLimit(req.query.limit, 50, 500);
-    const monitorId = req.query.monitorId ? Number(req.query.monitorId) : undefined;
+    let monitorId: number | undefined;
+    if (req.query.monitorId !== undefined) {
+      const parsed = parseId(req.query.monitorId);
+      if (parsed === null) return reply.code(400).send({ error: 'Invalid monitorId' });
+      monitorId = parsed;
+    }
     const incidents = store.listIncidents(limit, monitorId);
     const names = new Map(store.listMonitors().map((m) => [m.id, m.name]));
     return incidents.map((i) => ({ ...i, monitorName: names.get(i.monitorId) ?? 'deleted monitor' }));
@@ -255,8 +283,10 @@ export async function buildServer() {
   // ---------------------------------------------------------- test notify
 
   app.post('/api/test-notification', async (req, reply) => {
-    const { monitorId } = (req.body ?? {}) as { monitorId?: number };
-    const monitor = monitorId ? store.getMonitor(monitorId) : store.listMonitors()[0];
+    const { monitorId } = (req.body ?? {}) as { monitorId?: unknown };
+    const wantId =
+      typeof monitorId === 'number' && Number.isSafeInteger(monitorId) && monitorId > 0 ? monitorId : null;
+    const monitor = wantId !== null ? store.getMonitor(wantId) : store.listMonitors()[0];
     const subject: Monitor = monitor ?? {
       id: 0,
       name: 'uptime-sentinel',

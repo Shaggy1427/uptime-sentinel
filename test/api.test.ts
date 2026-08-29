@@ -97,6 +97,28 @@ test('checks and incidents endpoints tolerate garbage and negative limit params'
   assert.equal(incidents.statusCode, 200);
 });
 
+test('a non-numeric monitor id is a 400, not a silent empty result', async () => {
+  // Number('abc') is NaN, which binds and matches nothing. Every id-bearing
+  // route must reject it the same way rather than one 404-ing and another
+  // returning 200 [].
+  for (const url of ['/api/monitors/abc', '/api/monitors/abc/checks', '/api/incidents?monitorId=abc']) {
+    const res = await app.inject({ method: 'GET', url });
+    assert.equal(res.statusCode, 400, `${url} should be a 400`);
+    assert.match(res.json().error, /invalid/i);
+  }
+
+  const check = await app.inject({ method: 'POST', url: '/api/monitors/abc/check' });
+  assert.equal(check.statusCode, 400);
+  const patch = await app.inject({ method: 'PATCH', url: '/api/monitors/1.5', payload: { paused: true } });
+  assert.equal(patch.statusCode, 400);
+  const del = await app.inject({ method: 'DELETE', url: '/api/monitors/9999999999999999' });
+  assert.equal(del.statusCode, 400);
+
+  // A well-formed id that simply does not exist is still a 404.
+  const missing = await app.inject({ method: 'GET', url: '/api/monitors/424242' });
+  assert.equal(missing.statusCode, 404);
+});
+
 test('PATCH cannot flip a monitor into a type its target does not support', async () => {
   const created = await app.inject({
     method: 'POST',
