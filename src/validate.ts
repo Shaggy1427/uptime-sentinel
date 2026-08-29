@@ -17,8 +17,19 @@ export const LIMITS = {
 export class ValidationError extends Error {}
 
 function num(value: unknown, field: string, min: number, max: number): number {
-  const n = typeof value === 'number' ? value : Number.parseInt(String(value), 10);
-  if (Number.isNaN(n)) throw new ValidationError(`${field} must be a number`);
+  // Every field that reaches here is a whole number of seconds, milliseconds or
+  // retries. Number.parseInt would silently accept "60abc" as 60 and "30.9" as
+  // 30, and a raw JSON 1.5 would sail through the range check as a fractional
+  // "retries". Require a canonical integer instead.
+  let n: number;
+  if (typeof value === 'number') {
+    n = value;
+  } else if (typeof value === 'string' && /^-?\d+$/.test(value.trim())) {
+    n = Number(value.trim());
+  } else {
+    throw new ValidationError(`${field} must be a whole number`);
+  }
+  if (!Number.isInteger(n)) throw new ValidationError(`${field} must be a whole number`);
   if (n < min || n > max) throw new ValidationError(`${field} must be between ${min} and ${max}`);
   return n;
 }
