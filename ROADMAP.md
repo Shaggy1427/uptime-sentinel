@@ -11,14 +11,13 @@ good next issues. Each entry notes the files you would touch.
 - [ ] **Per-monitor channel routing** — critical services to a loud channel,
       everything else to a quiet one. Needs a `channels` column on `monitors`.
 - [ ] **Quiet hours** — suppress non-urgent alerts overnight, still queue a summary.
-- [ ] **Alert grouping** — if the uplink drops, 12 monitors fail at once. Detect a
-      shared-dependency outage and send one message instead of twelve.
+- [x] **Alert grouping** — done, via dependencies: one alert naming the
+      monitors it stands in for.
 
 ## Monitoring
 
-- [ ] **Dependency graph** — mark monitors as "behind" the router monitor, and
-      suppress their alerts when the parent is down. This is the highest-value item
-      on this list once you have more than ~5 monitors.
+- [x] **Dependency graph** — done. `parentId` on a monitor; children are not
+      checked while an ancestor is down.
 - [ ] **TLS certificate expiry** — warn N days before a cert expires.
 - [ ] **DNS record monitor** — assert a hostname resolves to an expected address.
 - [x] **JSON body assertions** — done. A `json` monitor type asserts on a path

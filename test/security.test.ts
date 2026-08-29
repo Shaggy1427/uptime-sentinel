@@ -116,7 +116,9 @@ test('health stays open but exposes only counts', async () => {
   assert.equal(res.statusCode, 200);
   assert.ok(!res.body.includes('INTERNAL-ONLY'));
   assert.ok(!res.body.includes('10.0.0.5'));
-  assert.deepEqual(Object.keys(res.json()).sort(), ['down', 'monitors', 'ok', 'uptimeS', 'version']);
+  // Intentionally strict: this endpoint is unauthenticated, so every new key
+  // has to be looked at. Counts are fine; targets and configuration are not.
+  assert.deepEqual(Object.keys(res.json()).sort(), ['down', 'monitors', 'ok', 'suppressed', 'uptimeS', 'version']);
 });
 
 test('the cookie signing key is random, not derived from the password', async () => {

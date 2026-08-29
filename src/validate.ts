@@ -39,11 +39,25 @@ function num(value: unknown, field: string, min: number, max: number): number {
 export interface ValidateOptions {
   partial: boolean;
   /** The stored monitor on PATCH, so fields can be validated in combination. */
-  current?: Pick<Monitor, 'type' | 'method' | 'keyword' | 'target' | 'jsonPath' | 'jsonOperator' | 'jsonExpected'>;
+  current?: Pick<
+    Monitor,
+    'type' | 'method' | 'keyword' | 'target' | 'jsonPath' | 'jsonOperator' | 'jsonExpected'
+  > & { id?: number };
+  /**
+   * Dependency graph access, injected rather than imported.
+   *
+   * config.ts imports LIMITS from this module, so importing db.ts here would
+   * close a cycle (config -> validate -> db -> config) that fails at load.
+   * Injection also keeps this module pure and testable.
+   */
+  graph?: {
+    exists(id: number): boolean;
+    wouldCreateCycle(selfId: number, parentId: number): boolean;
+  };
 }
 
 /** Shared shape validation for create (strict) and patch (partial). */
-export function validateMonitor(input: unknown, { partial, current }: ValidateOptions): Partial<MonitorInput> {
+export function validateMonitor(input: unknown, { partial, current, graph }: ValidateOptions): Partial<MonitorInput> {
   if (typeof input !== 'object' || input === null) throw new ValidationError('Body must be an object');
   const raw = input as Record<string, unknown>;
   const out: Record<string, unknown> = {};
@@ -179,6 +193,28 @@ export function validateMonitor(input: unknown, { partial, current }: ValidateOp
       throw new ValidationError(`jsonExpected is required when jsonOperator is "${operator}"`);
     }
     if (!has('jsonOperator') && !current?.jsonOperator) out.jsonOperator = 'exists';
+  }
+
+  if (has('parentId')) {
+    if (raw.parentId === null || raw.parentId === '') {
+      out.parentId = null;
+    } else {
+      const parentId = num(raw.parentId, 'parentId', 1, Number.MAX_SAFE_INTEGER);
+      if (graph && !graph.exists(parentId)) {
+        throw new ValidationError(`No monitor with id ${parentId} to depend on`);
+      }
+
+      const selfId = current?.id;
+      if (selfId !== undefined) {
+        // A cycle would make every monitor in the loop permanently suppress the
+        // next, so nothing in it would ever be checked again.
+        if (selfId === parentId) throw new ValidationError('A monitor cannot depend on itself');
+        if (graph?.wouldCreateCycle(selfId, parentId)) {
+          throw new ValidationError('That dependency would create a loop');
+        }
+      }
+      out.parentId = parentId;
+    }
   }
 
   const keyword = has('keyword') ? out.keyword : (current?.keyword ?? null);

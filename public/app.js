@@ -90,10 +90,18 @@ function monitorCard(m) {
   head.append(el('span', 'dot'), el('span', 'm-name', m.name), el('span', 'm-type', m.type));
   card.append(head, el('div', 'm-target', m.target));
 
+  if (m.status === 'suppressed') {
+    card.append(el('div', 'm-waiting', `Not checked — waiting on ${m.suppressedBy ?? 'a dependency'}`));
+  }
+
   if (m.status === 'down' && m.lastResult?.error) {
     const err = el('div', 'm-error', m.lastResult.error);
     if (m.downSinceMs != null) err.textContent += ` - down ${duration(m.downSinceMs)}`;
     card.append(err);
+  }
+
+  if (m.dependentCount > 0) {
+    card.append(el('div', 'm-deps', `${m.dependentCount} monitor${m.dependentCount === 1 ? '' : 's'} depend on this`));
   }
 
   card.append(sparkline(m.history));
@@ -160,6 +168,8 @@ function monitorCard(m) {
   return card;
 }
 
+let lastMonitors = [];
+
 function renderMonitors(monitors) {
   const grid = $('#monitors');
   grid.replaceChildren();
@@ -167,7 +177,7 @@ function renderMonitors(monitors) {
     grid.append(el('p', 'empty-state', 'No monitors yet. Click "Add monitor" to start watching something.'));
     return;
   }
-  const rank = { down: 0, pending: 1, up: 2, paused: 3 };
+  const rank = { down: 0, pending: 1, up: 2, suppressed: 3, paused: 4 };
   monitors.sort((a, b) => rank[a.status] - rank[b.status] || a.name.localeCompare(b.name));
   for (const m of monitors) grid.append(monitorCard(m));
 }
@@ -183,6 +193,8 @@ function renderSummary(monitors, notificationsConfigured) {
   };
   add('up', count('up'));
   add('down', count('down'));
+  const suppressed = count('suppressed');
+  if (suppressed > 0) add('suppressed', suppressed);
   add('paused', count('paused'));
 
   if (!notificationsConfigured) {
@@ -254,6 +266,38 @@ function syncJsonOperator() {
   $('#field-json-expected').classList.toggle('hidden', !needsValue);
 }
 
+/** Options for "depends on": every other monitor that would not form a loop. */
+function fillParentOptions(monitor) {
+  const select = $('#editor-form').elements.parentId;
+  const banned = new Set(monitor ? [monitor.id, ...descendantIdsOf(monitor.id)] : []);
+  select.replaceChildren(el('option', null, 'Nothing — check independently'));
+  select.firstChild.value = '';
+  for (const candidate of lastMonitors) {
+    if (banned.has(candidate.id)) continue;
+    const option = el('option', null, candidate.name);
+    option.value = String(candidate.id);
+    select.append(option);
+  }
+  select.value = monitor?.parentId ? String(monitor.parentId) : '';
+}
+
+/** Ids beneath `id`, so the editor cannot offer a loop the API would reject. */
+function descendantIdsOf(id) {
+  const out = [];
+  const queue = [id];
+  const seen = new Set(queue);
+  while (queue.length) {
+    const current = queue.shift();
+    for (const m of lastMonitors) {
+      if (m.parentId !== current || seen.has(m.id)) continue;
+      seen.add(m.id);
+      out.push(m.id);
+      queue.push(m.id);
+    }
+  }
+  return out;
+}
+
 function openEditor(monitor) {
   editingId = monitor?.id ?? null;
   const form = $('#editor-form');
@@ -269,6 +313,7 @@ function openEditor(monitor) {
     form.elements.keywordInverted.checked = monitor.keywordInverted;
     form.elements.ignoreTls.checked = monitor.ignoreTls;
   }
+  fillParentOptions(monitor);
   syncEditorType();
   $('#editor').showModal();
 }
@@ -294,6 +339,7 @@ async function saveEditor(event) {
     jsonPath: f.jsonPath.value.trim() || null,
     jsonOperator: f.jsonOperator.value,
     jsonExpected: f.jsonExpected.value.trim() || null,
+    parentId: f.parentId.value ? Number(f.parentId.value) : null,
   };
 
   // Only a json monitor carries these; sending them for other types would
@@ -347,6 +393,7 @@ async function submitLogin(event) {
 
 async function refresh() {
   const [status, incidents] = await Promise.all([api('/api/status'), api('/api/incidents?limit=25')]);
+  lastMonitors = status.monitors;
   renderSummary(status.monitors, status.notificationsConfigured);
   renderMonitors(status.monitors);
   renderIncidents(incidents);
