@@ -223,6 +223,45 @@ file (uncomment the mount in `docker-compose.yml`), or point `MONITORS_FILE` at
 one. See [`monitors.example.json`](monitors.example.json) for the shape. This
 only runs against an empty database — after that, the UI is the source of truth.
 
+## Dependencies
+
+When your Unraid box goes down, every monitor pointed at it fails at the same
+moment. Eight monitors means eight urgent pushes for one outage — and the
+rational response to that is to mute notifications, which is how you miss the
+next real one.
+
+Set **Depends on** to tell a monitor what it sits behind:
+
+```
+Router
+└── Unraid host
+    ├── Plex
+    ├── SMB shares
+    └── Home Assistant
+```
+
+While a parent is down, everything beneath it is **not checked at all** — no
+request, no stored result, no incident, no notification. A service behind a dead
+router isn't down in any way you can act on; you cannot know, and being told is
+noise on top of the one alert that matters. Those monitors show as `suppressed`
+on the dashboard, saying what they are waiting on.
+
+You get **one** notification, naming what it stands in for:
+
+```
+DOWN: Unraid host
+Down for 2m.
+Error: Connection refused
+5 monitors behind this are not being checked: Plex, SMB shares, ...
+```
+
+Because suppressed monitors record no checks, a router outage does not count
+against Plex's uptime figure — the gap simply isn't attributed to it.
+
+Dependencies nest to any depth. Loops are rejected when you try to save them
+(they would suppress each other forever), and deleting a parent leaves its
+children in place, just unparented.
+
 ## Monitor types
 
 | Type | Target format | Good for |

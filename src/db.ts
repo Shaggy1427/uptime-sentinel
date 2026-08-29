@@ -61,6 +61,12 @@ const MIGRATIONS: string[] = [
   CREATE INDEX idx_incidents_monitor ON incidents(monitor_id, started_at DESC);
   CREATE INDEX idx_incidents_open ON incidents(monitor_id) WHERE resolved_at IS NULL;
   `,
+  // 2: dependency-aware alerting. ON DELETE SET NULL so removing a parent
+  // orphans its children rather than deleting them with it.
+  `
+  ALTER TABLE monitors ADD COLUMN parent_id INTEGER REFERENCES monitors(id) ON DELETE SET NULL;
+  CREATE INDEX idx_monitors_parent ON monitors(parent_id);
+  `,
 ];
 
 function migrate(): void {
@@ -103,6 +109,7 @@ function toMonitor(r: Row): Monitor {
     ignoreTls: Number(r.ignore_tls) === 1,
     method: String(r.method),
     headers: r.headers ? (JSON.parse(String(r.headers)) as Record<string, string>) : null,
+    parentId: r.parent_id === null || r.parent_id === undefined ? null : Number(r.parent_id),
     paused: Number(r.paused) === 1,
     createdAt: Number(r.created_at),
     updatedAt: Number(r.updated_at),
@@ -154,8 +161,9 @@ export function createMonitor(input: MonitorInput): Monitor {
     .prepare(
       `INSERT INTO monitors
        (name, type, target, interval_s, timeout_ms, retries, alert_after_s, reminder_every_s,
-        accepted_status, keyword, keyword_inverted, ignore_tls, method, headers, paused, created_at, updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        accepted_status, keyword, keyword_inverted, ignore_tls, method, headers,
+        parent_id, paused, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     )
     .run(
       input.name,
@@ -172,6 +180,7 @@ export function createMonitor(input: MonitorInput): Monitor {
       bool(input.ignoreTls ?? false),
       input.method ?? 'GET',
       input.headers ? JSON.stringify(input.headers) : null,
+      input.parentId ?? null,
       bool(input.paused ?? false),
       now,
       now,
@@ -194,6 +203,7 @@ const UPDATABLE: Record<string, string> = {
   ignoreTls: 'ignore_tls',
   method: 'method',
   headers: 'headers',
+  parentId: 'parent_id',
   paused: 'paused',
 };
 
@@ -325,4 +335,59 @@ export function listIncidents(limit = 50, monitorId?: number): Incident[] {
     : 'SELECT * FROM incidents ORDER BY started_at DESC LIMIT ?';
   const rows = (monitorId ? db.prepare(sql).all(monitorId, limit) : db.prepare(sql).all(limit)) as Row[];
   return rows.map(toIncident);
+}
+
+// ------------------------------------------------------------ dependencies
+
+/**
+ * Ancestors of a monitor, nearest first.
+ *
+ * Cycles are rejected on write, but this walks defensively anyway: a corrupt
+ * or hand-edited database must not be able to hang the scheduler in a loop.
+ */
+export function ancestorsOf(monitorId: number, all?: Monitor[]): Monitor[] {
+  const byId = new Map((all ?? listMonitors()).map((m) => [m.id, m]));
+  const chain: Monitor[] = [];
+  const seen = new Set<number>([monitorId]);
+
+  let current = byId.get(monitorId)?.parentId ?? null;
+  while (current !== null && !seen.has(current)) {
+    seen.add(current);
+    const parent = byId.get(current);
+    if (!parent) break;
+    chain.push(parent);
+    current = parent.parentId;
+  }
+  return chain;
+}
+
+/** Every monitor beneath this one, at any depth. */
+export function descendantsOf(monitorId: number, all?: Monitor[]): Monitor[] {
+  const monitors = all ?? listMonitors();
+  const byParent = new Map<number, Monitor[]>();
+  for (const m of monitors) {
+    if (m.parentId === null) continue;
+    const list = byParent.get(m.parentId);
+    if (list) list.push(m);
+    else byParent.set(m.parentId, [m]);
+  }
+
+  const out: Monitor[] = [];
+  const seen = new Set<number>([monitorId]);
+  const queue = [monitorId];
+  while (queue.length > 0) {
+    for (const child of byParent.get(queue.shift()!) ?? []) {
+      if (seen.has(child.id)) continue;
+      seen.add(child.id);
+      out.push(child);
+      queue.push(child.id);
+    }
+  }
+  return out;
+}
+
+/** Whether pointing `monitorId` at `parentId` would close a loop. */
+export function wouldCreateCycle(monitorId: number, parentId: number): boolean {
+  if (monitorId === parentId) return true;
+  return ancestorsOf(parentId).some((m) => m.id === monitorId);
 }

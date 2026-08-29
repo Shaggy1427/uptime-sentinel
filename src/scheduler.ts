@@ -1,6 +1,8 @@
 import {
+  ancestorsOf,
   bumpIncident,
   createIncident,
+  descendantsOf,
   getMonitor,
   insertCheck,
   listMonitors,
@@ -24,6 +26,8 @@ interface RuntimeState {
   lastCheckedAt: number | null;
   nextCheckAt: number | null;
   inFlight: boolean;
+  /** Id of the ancestor currently blocking this monitor's checks. */
+  suppressedBy: number | null;
 }
 
 function freshState(): RuntimeState {
@@ -35,6 +39,7 @@ function freshState(): RuntimeState {
     lastCheckedAt: null,
     nextCheckAt: null,
     inFlight: false,
+    suppressedBy: null,
   };
 }
 
@@ -135,12 +140,52 @@ export class Scheduler {
     this.timers.set(monitor.id, timer);
   }
 
+  /**
+   * The nearest ancestor that is currently down, or null.
+   *
+   * A service behind a dead router is not "down" in any way you can act on --
+   * you cannot know, and being told about it is noise on top of the one alert
+   * that matters. So while an ancestor is down the child is not checked at all:
+   * no request, no stored result, no incident, no notification.
+   */
+  private suppressor(monitor: Monitor, all?: Monitor[]): Monitor | null {
+    for (const ancestor of ancestorsOf(monitor.id, all)) {
+      if (ancestor.paused) continue;
+      if (this.states.get(ancestor.id)?.status === 'down') return ancestor;
+    }
+    return null;
+  }
+
+  /** Names of the monitors this one is standing in for, for a grouped alert. */
+  private suppressedNames(monitor: Monitor): string[] {
+    return descendantsOf(monitor.id)
+      .filter((m) => !m.paused)
+      .map((m) => m.name);
+  }
+
   private async tick(monitorId: number): Promise<void> {
     const monitor = getMonitor(monitorId);
     if (!monitor || monitor.paused) {
       this.timers.delete(monitorId);
       return;
     }
+
+    const blockedBy = this.suppressor(monitor);
+    if (blockedBy) {
+      const state = this.states.get(monitor.id) ?? freshState();
+      this.states.set(monitor.id, state);
+      state.status = 'suppressed';
+      state.suppressedBy = blockedBy.id;
+      // Deliberately no check, no stored result: an unreachable dependency
+      // makes the answer unknowable, and recording a failure would both spam
+      // alerts and corrupt the uptime figure with an outage that is not ours.
+      if (this.running) this.schedule(monitor, monitor.intervalS * 1000);
+      return;
+    }
+    if (this.states.get(monitor.id)?.suppressedBy != null) {
+      this.states.get(monitor.id)!.suppressedBy = null;
+    }
+
     await this.execute(monitor);
     // Re-read after the (possibly long) check: the monitor may have been
     // paused or deleted while the check was in flight, in which case the
@@ -215,6 +260,7 @@ export class Scheduler {
         reason: null,
         downForMs: now - incident.startedAt,
         at: now,
+        suppressed: this.suppressedNames(monitor),
       });
     }
   }
@@ -248,7 +294,15 @@ export class Scheduler {
 
     if (incident.alertedAt === null) {
       if (downForMs >= monitor.alertAfterS * 1000) {
-        const results = await dispatch({ kind: 'down', monitor, incident, reason: result.error, downForMs, at: now });
+        const results = await dispatch({
+          kind: 'down',
+          monitor,
+          incident,
+          reason: result.error,
+          downForMs,
+          at: now,
+          suppressed: this.suppressedNames(monitor),
+        });
         // Only record the alert once it was actually delivered somewhere.
         // Otherwise the next failing check retries, so a momentary ntfy
         // hiccup cannot swallow the first DOWN notification forever.
@@ -271,6 +325,7 @@ export class Scheduler {
           reason: result.error,
           downForMs,
           at: now,
+          suppressed: this.suppressedNames(monitor),
         });
         if (results.some((r) => r.ok)) {
           markIncidentReminded(incident.id, now);

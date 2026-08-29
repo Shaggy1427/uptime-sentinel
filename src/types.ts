@@ -21,6 +21,11 @@ export interface Monitor {
   ignoreTls: boolean;
   method: string;
   headers: Record<string, string> | null;
+  /**
+   * Monitor this one sits behind. While the parent is down this monitor is not
+   * checked and cannot alert, because its own result would be meaningless.
+   */
+  parentId: number | null;
   paused: boolean;
   createdAt: number;
   updatedAt: number;
@@ -54,4 +59,4 @@ export interface Incident {
   checksFailed: number;
 }
 
-export type MonitorStatus = 'up' | 'down' | 'pending' | 'paused';
+export type MonitorStatus = 'up' | 'down' | 'pending' | 'paused' | 'suppressed';

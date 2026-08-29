@@ -66,6 +66,11 @@
         <label>Timeout (ms)<input name="timeoutMs" type="number" min="500" max="120000" value="10000" /></label>
         <label>Retries before down<input name="retries" type="number" min="1" max="20" value="2" /></label>
 
+        <label class="wide">Depends on
+          <select name="parentId"><option value="">Nothing — check independently</option></select>
+          <small>While this is down, the monitors behind it are not checked and cannot alert.</small>
+        </label>
+
         <label>Alert after down for (s)
           <input name="alertAfterS" type="number" min="0" max="86400" value="120" />
           <small>0 = alert immediately</small>

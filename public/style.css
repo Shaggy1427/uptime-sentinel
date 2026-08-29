@@ -87,6 +87,14 @@ main { max-width: 1280px; margin: 0 auto; padding: 1.25rem; }
 .monitor.up { border-left-color: var(--up); }
 .monitor.down { border-left-color: var(--down); }
 .monitor.pending { border-left-color: var(--pending); }
+.monitor.suppressed { border-left-color: var(--accent); opacity: .72; }
+.suppressed .dot { background: var(--accent); }
+.m-waiting {
+  font-size: .8rem; color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border-radius: 6px; padding: .35rem .5rem;
+}
+.m-deps { font-size: .72rem; color: var(--muted); }
 
 .m-head { display: flex; align-items: baseline; gap: .5rem; }
 .m-name { font-weight: 600; }
