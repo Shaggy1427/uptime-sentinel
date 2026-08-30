@@ -5,7 +5,7 @@ import {
   descendantsOf,
   getMonitor,
   insertCheck,
-  listMonitors,
+  listMonitorsUnsorted,
   markIncidentAlerted,
   markIncidentReminded,
   openIncidentFor,
@@ -68,7 +68,7 @@ export class Scheduler {
 
   /** Restore DOWN state across restarts so an open incident is not re-alerted from zero. */
   private rehydrate(): void {
-    for (const monitor of listMonitors()) {
+    for (const monitor of listMonitorsUnsorted()) {
       const state = freshState();
       if (monitor.paused) {
         state.status = 'paused';
@@ -91,7 +91,7 @@ export class Scheduler {
     // (a paused monitor's incident, the failure streak) must run either way, or
     // a pause applied before start() -- or in a test that never calls it -- would
     // leave a stale open incident behind.
-    const monitors = listMonitors();
+    const monitors = listMonitorsUnsorted();
     const live = new Set(monitors.map((m) => m.id));
 
     for (const [id, timer] of this.timers) {
@@ -421,7 +421,7 @@ export class Scheduler {
    * scheduler has stalled is still broken.
    */
   health(): { activeMonitors: number; lastCheckAt: number | null; slowestIntervalS: number } {
-    const active = listMonitors().filter((m) => !m.paused);
+    const active = listMonitorsUnsorted().filter((m) => !m.paused);
 
     let lastCheckAt: number | null = null;
     for (const state of this.states.values()) {
