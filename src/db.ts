@@ -509,13 +509,7 @@ export function ancestorsOf(monitorId: number, all?: Monitor[]): Monitor[] {
 /** Every monitor beneath this one, at any depth. */
 export function descendantsOf(monitorId: number, all?: Monitor[]): Monitor[] {
   const monitors = all ?? listMonitors();
-  const byParent = new Map<number, Monitor[]>();
-  for (const m of monitors) {
-    if (m.parentId === null) continue;
-    const list = byParent.get(m.parentId);
-    if (list) list.push(m);
-    else byParent.set(m.parentId, [m]);
-  }
+  const byParent = buildByParent(monitors);
 
   const out: Monitor[] = [];
   const seen = new Set<number>([monitorId]);
@@ -529,6 +523,46 @@ export function descendantsOf(monitorId: number, all?: Monitor[]): Monitor[] {
     }
   }
   return out;
+}
+
+/** parentId -> children, for a single full scan that callers can reuse. */
+function buildByParent(monitors: Monitor[]): Map<number, Monitor[]> {
+  const byParent = new Map<number, Monitor[]>();
+  for (const m of monitors) {
+    if (m.parentId === null) continue;
+    const list = byParent.get(m.parentId);
+    if (list) list.push(m);
+    else byParent.set(m.parentId, [m]);
+  }
+  return byParent;
+}
+
+/**
+ * Non-paused descendant count for every monitor, in one O(N x depth) pass.
+ *
+ * The dashboard poll describes every monitor at once, and each one used to
+ * call `descendantsOf` to compute its own count: N x O(N) work for an answer
+ * that's only "how many non-paused children do I have". Walking every
+ * non-paused monitor up to its ancestors gives the same answer in time
+ * proportional to the depth of the tree, which in practice is 2-3 even on
+ * the busiest configs.
+ */
+export function descendantCountMap(monitors: Monitor[]): Map<number, number> {
+  const byId = new Map(monitors.map((m) => [m.id, m]));
+  const counts = new Map<number, number>();
+  for (const m of monitors) counts.set(m.id, 0);
+
+  for (const m of monitors) {
+    if (m.paused) continue;
+    let current = m.parentId;
+    while (current !== null) {
+      const ancestor = byId.get(current);
+      if (!ancestor) break;
+      counts.set(ancestor.id, (counts.get(ancestor.id) ?? 0) + 1);
+      current = ancestor.parentId;
+    }
+  }
+  return counts;
 }
 
 /** Whether pointing `monitorId` at `parentId` would close a loop. */

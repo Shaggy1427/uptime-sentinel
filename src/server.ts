@@ -73,6 +73,8 @@ interface StatusContext {
   historyByMonitor: Map<number, Check[]>;
   /** Per monitor: [day, week, month] uptime, in that order. */
   uptimeByMonitor: Map<number, store.UptimeStats[]>;
+  /** Non-paused descendant count per monitor. Pre-baked so describe is O(1). */
+  dependentCountByMonitor: Map<number, number>;
 }
 
 /**
@@ -101,6 +103,7 @@ function contextForOne(monitor: Monitor): StatusContext {
         ],
       ],
     ]),
+    dependentCountByMonitor: store.descendantCountMap(monitors),
   };
 }
 
@@ -125,7 +128,7 @@ function describe(monitor: Monitor, ctx: StatusContext) {
     // Named so the dashboard can say what a monitor is waiting on rather than
     // just showing it greyed out for no visible reason.
     suppressedBy: blockedById === null ? null : (byId.get(blockedById)?.name ?? null),
-    dependentCount: store.descendantsOf(monitor.id, monitors).filter((m) => !m.paused).length,
+    dependentCount: ctx.dependentCountByMonitor.get(monitor.id) ?? 0,
     lastResult: state?.lastResult ?? null,
     lastCheckedAt: state?.lastCheckedAt ?? newestCheckAt,
     nextCheckAt: state?.nextCheckAt ?? null,
@@ -316,6 +319,7 @@ export async function buildServer() {
       openIncidentByMonitor,
       historyByMonitor: store.recentChecksAll(40),
       uptimeByMonitor: store.uptimeSinceAll([now - DAY, now - 7 * DAY, now - 30 * DAY]),
+      dependentCountByMonitor: store.descendantCountMap(monitors),
     };
 
     return {

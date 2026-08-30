@@ -37,6 +37,23 @@ test('ancestors and descendants walk the chain', () => {
   assert.deepEqual(store.descendantsOf(smb.id), []);
 });
 
+test('descendantCountMap counts non-paused descendants for every monitor at once', () => {
+  const router = make('Router');
+  const host = make('Unraid', router.id);
+  const plex = make('Plex', host.id);
+  const smb = make('SMB', host.id);
+  const lone = make('Lone');
+  store.updateMonitor(smb.id, { paused: true });
+
+  const counts = store.descendantCountMap(store.listMonitors());
+  // Router has 3 non-paused descendants (Host, Plex, SMB is paused -> 2).
+  assert.equal(counts.get(router.id), 2);
+  assert.equal(counts.get(host.id), 1, 'paused grandchild must not be counted');
+  assert.equal(counts.get(plex.id), 0);
+  assert.equal(counts.get(smb.id), 0);
+  assert.equal(counts.get(lone.id), 0);
+});
+
 test('deleting a parent orphans its children rather than deleting them', () => {
   const host = make('Unraid');
   const plex = make('Plex', host.id);
