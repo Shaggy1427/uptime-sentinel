@@ -18,11 +18,28 @@ export interface HeartbeatOptions {
 }
 
 /**
- * After this many milliseconds of idle (no completed checks), the scheduler is
- * considered stalled and the heartbeat will withhold its ping, signalling to an
- * external service that this process may be broken.
+ * Grace added on top of two full check cycles before a silent scheduler counts
+ * as stalled. Two cycles already absorbs a slow poll; this covers timer jitter
+ * and a check that runs long, so a healthy-but-busy loop is not called dead.
  */
-const IDLE_THRESHOLD_MS = 60_000;
+const IDLE_GRACE_MS = 60_000;
+
+/**
+ * Outbound dead-man's-switch.
+ *
+ * Every other alert here depends on this process being alive to send it. If the
+ * host loses power or the process wedges, nothing is sent and silence is
+ * indistinguishable from "everything is fine" -- the one failure mode where the
+ * monitor lies by saying nothing at all.
+ *
+ * This inverts it: ping an external service on a schedule and let *that* service
+ * alert when the pings stop. Point HEARTBEAT_URL at a healthchecks.io check, an
+ * Uptime Kuma push monitor, or anything that notices absence.
+ *
+ * It pings only when the scheduler is actually running checks. A process that is
+ * up but has stopped checking is still broken, and a naive "I am alive" ping
+ * would paper over exactly that.
+ */
 export class Heartbeat {
   private timer: NodeJS.Timeout | null = null;
   private startedAt: number;
@@ -74,7 +91,7 @@ export class Heartbeat {
     }
 
     const idleMs = now - health.lastCheckAt;
-    if (idleMs > cycleMs * 2 + IDLE_THRESHOLD_MS) {
+    if (idleMs > cycleMs * 2 + IDLE_GRACE_MS) {
       return `no check has completed in ${Math.round(idleMs / 1000)}s`;
     }
 
