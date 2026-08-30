@@ -124,3 +124,33 @@ test('a concurrent runNow during alert dispatch does not start a second pass', a
   assert.equal(store.recentChecks(monitorId, 100).length, 1, 'only one check should have been recorded');
   assert.equal(store.listIncidents(100, monitorId).length, 1, 'only one incident should exist');
 });
+
+test('a manual check is refused while suppressed by a down dependency', async () => {
+  const parentId = monitorId; // beforeEach monitor: its endpoint returns 503
+  const childId = store.createMonitor({
+    name: 'child',
+    type: 'http',
+    target: `http://127.0.0.1:${port}/`,
+    intervalS: 5,
+    timeoutMs: 2000,
+    retries: 1,
+    alertAfterS: 0,
+    reminderEveryS: 0,
+    parentId,
+  }).id;
+
+  await scheduler.runNow(parentId);
+  assert.equal(scheduler.getState(parentId)?.status, 'down');
+
+  sent.length = 0;
+  attempts.length = 0;
+  mode = 200; // the child's own endpoint is now fine -- irrelevant while the parent is down
+
+  const r = await scheduler.runNow(childId);
+
+  assert.ok(r && r.ok === false && /is down/.test(r.error ?? ''), 'result explains the suppression');
+  assert.equal(store.recentChecks(childId, 10).length, 0, 'no check row recorded');
+  assert.equal(store.openIncidentFor(childId), null, 'no incident opened');
+  assert.deepEqual(attempts, [], 'no alert attempted');
+  assert.equal(scheduler.getState(childId)?.status, 'suppressed');
+});
