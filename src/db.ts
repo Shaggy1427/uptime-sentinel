@@ -297,29 +297,47 @@ export function recentChecks(monitorId: number, limit = 60): Check[] {
 }
 
 /**
+ * The fields of a check the dashboard history actually renders. Selecting
+ * only these keeps the per-monitor 40-row window from materialising columns
+ * (id, status_code, error) that describe() discards.
+ */
+export interface HistorySample {
+  monitorId: number;
+  ok: boolean;
+  latencyMs: number | null;
+  checkedAt: number;
+}
+
+/**
  * The most recent `perMonitor` checks for every monitor at once, oldest-first
  * within each list (matching `recentChecks`).
  *
  * For the dashboard poll, which describes every monitor, this is one windowed
  * scan instead of a `recentChecks` query per monitor.
  */
-export function recentChecksAll(perMonitor: number): Map<number, Check[]> {
+export function recentChecksAll(perMonitor: number): Map<number, HistorySample[]> {
   const rows = db
     .prepare(
-      `SELECT * FROM (
-         SELECT *, ROW_NUMBER() OVER (PARTITION BY monitor_id ORDER BY checked_at DESC) AS rn
+      `SELECT monitor_id, ok, latency_ms, checked_at FROM (
+         SELECT monitor_id, ok, latency_ms, checked_at,
+                ROW_NUMBER() OVER (PARTITION BY monitor_id ORDER BY checked_at DESC) AS rn
          FROM checks
        ) WHERE rn <= ?
        ORDER BY monitor_id, checked_at ASC`,
     )
     .all(perMonitor) as Row[];
 
-  const out = new Map<number, Check[]>();
+  const out = new Map<number, HistorySample[]>();
   for (const row of rows) {
-    const check = toCheck(row);
-    const list = out.get(check.monitorId);
-    if (list) list.push(check);
-    else out.set(check.monitorId, [check]);
+    const sample: HistorySample = {
+      monitorId: Number(row.monitor_id),
+      ok: Number(row.ok) === 1,
+      latencyMs: row.latency_ms === null ? null : Number(row.latency_ms),
+      checkedAt: Number(row.checked_at),
+    };
+    const list = out.get(sample.monitorId);
+    if (list) list.push(sample);
+    else out.set(sample.monitorId, [sample]);
   }
   return out;
 }
