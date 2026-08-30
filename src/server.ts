@@ -196,7 +196,19 @@ export async function buildServer() {
   });
 
   app.setErrorHandler((err: FastifyError, _req, reply) => {
-    if (err instanceof ValidationError) return reply.code(400).send({ error: err.message });
+    if (err instanceof ValidationError) {
+      app.log.warn({ err: err.message, validation: true }, 'validation failed');
+      // Map error messages that aid id enumeration to a single response.
+      // "No monitor with id N to depend on" tells an attacker which monitor
+      // ids exist; collapsing to a generic 404-shaped message removes the
+      // distinction between "no such id", "would create a cycle", and
+      // "depends on itself" without losing the detail in the server log.
+      let publicMessage = err.message;
+      if (/^No monitor with id \d+ to depend on/.test(err.message)) publicMessage = 'No such monitor';
+      else if (err.message === 'That dependency would create a loop') publicMessage = 'No such monitor';
+      else if (err.message === 'A monitor cannot depend on itself') publicMessage = 'No such monitor';
+      return reply.code(400).send({ error: publicMessage });
+    }
 
     const status = err.statusCode ?? 500;
     app.log.error(err);
