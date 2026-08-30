@@ -197,6 +197,19 @@ export function getMonitor(id: number): Monitor | null {
   return r ? toMonitor(r) : null;
 }
 
+/**
+ * id -> name for every monitor, from a two-column query.
+ *
+ * Callers that only need names (the incidents endpoint annotating rows with
+ * monitorName) used to pay listMonitors() for it: every row mapped field by
+ * field, including a JSON.parse of stored headers per monitor, just to throw
+ * all but id and name away.
+ */
+export function monitorNameMap(): Map<number, string> {
+  const rows = db.prepare('SELECT id, name FROM monitors').all() as { id: number; name: string }[];
+  return new Map(rows.map((r) => [Number(r.id), String(r.name)]));
+}
+
 export function createMonitor(input: MonitorInput): Monitor {
   const now = Date.now();
   const d = config.defaults;
@@ -554,8 +567,13 @@ export function descendantCountMap(monitors: Monitor[]): Map<number, number> {
 
   for (const m of monitors) {
     if (m.paused) continue;
+    // Walk defensively: cycles are rejected on write, but a corrupt or
+    // hand-edited database must not be able to hang the caller (this runs on
+    // every /api/status poll) the same way ancestorsOf refuses to.
+    const seen = new Set<number>([m.id]);
     let current = m.parentId;
-    while (current !== null) {
+    while (current !== null && !seen.has(current)) {
+      seen.add(current);
       const ancestor = byId.get(current);
       if (!ancestor) break;
       counts.set(ancestor.id, (counts.get(ancestor.id) ?? 0) + 1);

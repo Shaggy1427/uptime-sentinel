@@ -131,9 +131,16 @@ export function validateMonitor(input: unknown, { partial, current, graph }: Val
     const kw = raw.keyword === null ? null : String(raw.keyword);
     out.keyword = kw && kw.length > 0 ? kw.slice(0, 500) : null;
   }
-  if (has('keywordInverted')) out.keywordInverted = Boolean(raw.keywordInverted);
-  if (has('ignoreTls')) out.ignoreTls = Boolean(raw.ignoreTls);
-  if (has('paused')) out.paused = Boolean(raw.paused);
+  // Booleans are checked by type, not truthiness: Boolean("false") is true,
+  // so a client that marshals checkboxes as strings would pause a monitor by
+  // sending paused: "false".
+  if (has('keywordInverted') || has('ignoreTls') || has('paused')) {
+    for (const field of ['keywordInverted', 'ignoreTls', 'paused'] as const) {
+      if (!has(field)) continue;
+      if (typeof raw[field] !== 'boolean') throw new ValidationError(`${field} must be a boolean`);
+      out[field] = raw[field] as boolean;
+    }
+  }
 
   if (has('method')) {
     const method = String(raw.method).toUpperCase();

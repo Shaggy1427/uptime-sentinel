@@ -181,6 +181,27 @@ test('pausing mid-incident closes it silently; resume sends no RECOVERED', async
   assert.equal(scheduler.getState(monitorId)?.status, 'up');
 });
 
+test('pausing closes the incident even when the status is not "down"', async () => {
+  // Open an alerted incident (status 'down').
+  await scheduler.runNow(monitorId);
+  assert.ok(store.openIncidentFor(monitorId), 'incident is open');
+
+  // Recover, but every channel fails: handleUp leaves the incident open for
+  // the retry while the in-memory status moves on to 'up'.
+  mode = 200;
+  deliver = false;
+  await scheduler.runNow(monitorId);
+  assert.ok(store.openIncidentFor(monitorId), 'incident stays open until RECOVERED is delivered');
+  assert.equal(scheduler.getState(monitorId)?.status, 'up');
+
+  // Pausing must still end the incident timeline: the database decides,
+  // not the in-memory status.
+  store.updateMonitor(monitorId, { paused: true });
+  scheduler.sync();
+
+  assert.equal(store.openIncidentFor(monitorId), null, 'incident closed at the pause despite status "up"');
+});
+
 test('a failure after resume opens a fresh incident, not the stale one', async () => {
   await scheduler.runNow(monitorId);
   const firstId = store.openIncidentFor(monitorId)!.id;
@@ -196,4 +217,24 @@ test('a failure after resume opens a fresh incident, not the stale one', async (
 
   assert.notEqual(open.id, firstId, 'a new incident, not the stale one reopened');
   assert.equal(store.listIncidents(10, monitorId).length, 2);
+});
+
+test('a restart keeps an in-flight outage down even after retries was raised', async () => {
+  // Open an alerted incident with retries = 1 (beforeEach default).
+  await scheduler.runNow(monitorId); // 503 -> down, incident opens, DOWN alert
+  assert.ok(store.openIncidentFor(monitorId), 'incident is open');
+
+  // The operator raises retries while the outage is in flight, then the
+  // process restarts. rehydrate() restores the failure streak from
+  // incident.checksFailed (= 1), which is now below the new threshold.
+  store.updateMonitor(monitorId, { retries: 5 });
+  scheduler['rehydrate']();
+  assert.equal(scheduler.getState(monitorId)?.status, 'down');
+
+  // The next failing check must keep the monitor down and keep the incident
+  // moving -- not degrade it to 'pending' and stall the alerting.
+  await scheduler.runNow(monitorId);
+
+  assert.equal(scheduler.getState(monitorId)?.status, 'down', 'an open incident must not read as pending');
+  assert.equal(store.openIncidentFor(monitorId)!.checksFailed, 2, 'the failing check was counted');
 });
