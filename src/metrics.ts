@@ -99,22 +99,27 @@ export function renderMetrics(now = Date.now()): string {
     const current: MonitorStatus = m.paused ? 'paused' : (state?.status ?? 'pending');
     counts[current] = (counts[current] ?? 0) + 1;
 
-    const base = { id: m.id, monitor: m.name };
+    // The label fragment every per-monitor family reuses, with the name
+    // escaped once. Building it through labels({ ...base, ... }) per family
+    // re-ran four regex replaces over the same name 10+ times per monitor on
+    // every scrape. id/type/parent/window values below are code constants
+    // and need no escaping; only the user-chosen name does.
+    const base = `id="${m.id}",monitor="${esc(m.name)}"`;
 
-    up.push(`sentinel_monitor_up${labels(base)} ${current === 'up' ? 1 : 0}`);
+    up.push(`sentinel_monitor_up{${base}} ${current === 'up' ? 1 : 0}`);
     for (const s of STATUSES) {
-      status.push(`sentinel_monitor_status${labels({ ...base, status: s })} ${s === current ? 1 : 0}`);
+      status.push(`sentinel_monitor_status{${base},status="${s}"} ${s === current ? 1 : 0}`);
     }
     consecutiveFailures.push(
-      `sentinel_monitor_consecutive_failures${labels(base)} ${state?.consecutiveFailures ?? 0}`,
+      `sentinel_monitor_consecutive_failures{${base}} ${state?.consecutiveFailures ?? 0}`,
     );
 
     const lat = state?.lastResult?.latencyMs;
-    if (lat != null) latency.push(`sentinel_monitor_last_check_latency_seconds${labels(base)} ${lat / 1000}`);
+    if (lat != null) latency.push(`sentinel_monitor_last_check_latency_seconds{${base}} ${lat / 1000}`);
 
     if (state?.lastCheckedAt != null) {
       lastCheck.push(
-        `sentinel_monitor_last_check_timestamp_seconds${labels(base)} ${state.lastCheckedAt / 1000}`,
+        `sentinel_monitor_last_check_timestamp_seconds{${base}} ${state.lastCheckedAt / 1000}`,
       );
       if (newestCheckAt === null || state.lastCheckedAt > newestCheckAt) newestCheckAt = state.lastCheckedAt;
     }
@@ -123,7 +128,7 @@ export function renderMetrics(now = Date.now()): string {
       const incident = incidentByMonitor.get(m.id);
       if (incident) {
         downSince.push(
-          `sentinel_monitor_down_since_seconds${labels(base)} ${Math.round((now - incident.startedAt) / 1000)}`,
+          `sentinel_monitor_down_since_seconds{${base}} ${Math.round((now - incident.startedAt) / 1000)}`,
         );
       }
     }
@@ -134,17 +139,17 @@ export function renderMetrics(now = Date.now()): string {
         const s = stats[i];
         if (!s) return;
         if (s.ratio != null) {
-          upRatio.push(`sentinel_monitor_up_ratio${labels({ ...base, window })} ${s.ratio}`);
+          upRatio.push(`sentinel_monitor_up_ratio{${base},window="${window}"} ${s.ratio}`);
         }
         if (s.avgLatencyMs != null) {
           avgLatency.push(
-            `sentinel_monitor_avg_latency_seconds${labels({ ...base, window })} ${s.avgLatencyMs / 1000}`,
+            `sentinel_monitor_avg_latency_seconds{${base},window="${window}"} ${s.avgLatencyMs / 1000}`,
           );
         }
       });
     }
 
-    info.push(`sentinel_monitor_info${labels({ ...base, type: m.type, parent: m.parentId ?? '' })} 1`);
+    info.push(`sentinel_monitor_info{${base},type="${m.type}",parent="${m.parentId ?? ''}"} 1`);
   }
 
   // ---------------------------------------------------------------- global
