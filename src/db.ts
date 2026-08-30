@@ -2,7 +2,17 @@ import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
 import { config } from './config.ts';
-import type { Check, CheckResult, Incident, Monitor, MonitorInput, MonitorType } from './types.ts';
+import type {
+  Check,
+  CheckResult,
+  Incident,
+  MaintenanceInput,
+  MaintenanceRule,
+  MaintenanceWindow,
+  Monitor,
+  MonitorInput,
+  MonitorType,
+} from './types.ts';
 
 fs.mkdirSync(path.dirname(config.dbPath), { recursive: true });
 
@@ -107,6 +117,53 @@ const MIGRATIONS: string[] = [
   DROP INDEX idx_checks_monitor_time;
   CREATE INDEX idx_checks_monitor_time ON checks(monitor_id, checked_at DESC, ok, latency_ms);
   `,
+  // 5: scheduled maintenance windows. Two shapes only -- an absolute one-off
+  // and a weekly recurrence -- so the columns each shape uses are disjoint and
+  // the unused half is NULL. Cron was deliberately left out: it would mean a
+  // parser and a sixth production dependency for a homelab feature whose real
+  // use is "every Sunday at 3am" and "next Tuesday evening".
+  `
+  CREATE TABLE maintenance (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT    NOT NULL,
+    strategy    TEXT    NOT NULL,
+    starts_at   INTEGER,
+    ends_at     INTEGER,
+    start_min   INTEGER,
+    duration_s  INTEGER,
+    weekdays    INTEGER,
+    timezone    TEXT    NOT NULL DEFAULT '',
+    active      INTEGER NOT NULL DEFAULT 1,
+    created_at  INTEGER NOT NULL,
+    updated_at  INTEGER NOT NULL
+  );
+
+  CREATE TABLE monitor_maintenance (
+    monitor_id     INTEGER NOT NULL REFERENCES monitors(id)    ON DELETE CASCADE,
+    maintenance_id INTEGER NOT NULL REFERENCES maintenance(id) ON DELETE CASCADE,
+    PRIMARY KEY (monitor_id, maintenance_id)
+  );
+  CREATE INDEX idx_mm_maintenance ON monitor_maintenance(maintenance_id);
+  `,
+  // 6: tag checks taken inside a maintenance window.
+  //
+  // The alternative was to skip the check entirely, the way a dependency
+  // outage does. Recording and tagging keeps the latency history through a
+  // planned outage -- you can see the service come back before the window
+  // closes -- at the cost of a predicate on the uptime aggregates.
+  //
+  // That predicate is why the index is rebuilt. Migration 4 widened this index
+  // specifically so the aggregates could be answered index-only; adding
+  // `maintenance_id IS NULL` to them without adding the column here would send
+  // every uptime read back to the table for the whole retention window.
+  // ON DELETE SET NULL, not CASCADE: deleting a window must not delete the
+  // history it covered, it must only stop excluding it.
+  `
+  ALTER TABLE checks ADD COLUMN maintenance_id INTEGER REFERENCES maintenance(id) ON DELETE SET NULL;
+  DROP INDEX idx_checks_monitor_time;
+  CREATE INDEX idx_checks_monitor_time
+    ON checks(monitor_id, checked_at DESC, ok, latency_ms, maintenance_id);
+  `,
 ];
 
 function migrate(): void {
@@ -206,6 +263,8 @@ function toCheck(r: Row): Check {
     latencyMs: r.latency_ms === null ? null : Number(r.latency_ms),
     error: r.error === null ? null : String(r.error),
     checkedAt: Number(r.checked_at),
+    maintenanceId:
+      r.maintenance_id === null || r.maintenance_id === undefined ? null : Number(r.maintenance_id),
   };
 }
 
@@ -317,10 +376,23 @@ export function deleteMonitor(id: number): boolean {
 
 // -------------------------------------------------------------------- checks
 
-export function insertCheck(monitorId: number, result: CheckResult, at = Date.now()): void {
+/**
+ * Store a check result.
+ *
+ * `maintenanceId` tags the row with the window that was open when it ran, so
+ * the uptime aggregates can leave it out. Null is the ordinary case and counts
+ * normally.
+ */
+export function insertCheck(
+  monitorId: number,
+  result: CheckResult,
+  at = Date.now(),
+  maintenanceId: number | null = null,
+): void {
   prepared(
-    'INSERT INTO checks (monitor_id, ok, status_code, latency_ms, error, checked_at) VALUES (?,?,?,?,?,?)',
-  ).run(monitorId, bool(result.ok), result.statusCode, result.latencyMs, result.error, at);
+    `INSERT INTO checks (monitor_id, ok, status_code, latency_ms, error, checked_at, maintenance_id)
+     VALUES (?,?,?,?,?,?,?)`,
+  ).run(monitorId, bool(result.ok), result.statusCode, result.latencyMs, result.error, at, maintenanceId);
 }
 
 export function recentChecks(monitorId: number, limit = 60): Check[] {
@@ -372,12 +444,21 @@ export interface UptimeStats {
   avgLatencyMs: number | null;
 }
 
+/**
+ * Uptime over a window, with planned downtime left out.
+ *
+ * `maintenance_id IS NULL` is what makes a scheduled reboot cost nothing: the
+ * rows are still there and still visible on the dashboard, they simply do not
+ * reach the ratio. The column is the last one in idx_checks_monitor_time so
+ * this stays index-only -- see migration 6.
+ */
 export function uptimeSince(monitorId: number, sinceMs: number): UptimeStats {
   const r = prepared(
       `SELECT COUNT(*) AS total,
               COALESCE(SUM(ok), 0) AS up,
               AVG(CASE WHEN ok = 1 THEN latency_ms END) AS avg_latency
-       FROM checks WHERE monitor_id = ? AND checked_at >= ?`,
+       FROM checks
+       WHERE monitor_id = ? AND checked_at >= ? AND maintenance_id IS NULL`,
     )
     .get(monitorId, sinceMs) as Row;
   const total = Number(r.total);
@@ -401,13 +482,18 @@ export function uptimeSince(monitorId: number, sinceMs: number): UptimeStats {
  * Monitors with no checks inside the widest window are absent from the map
  * rather than present with zeroes -- "no data" and "nothing passed" are
  * different answers, and only the caller knows which one to render.
+ *
+ * Checks taken inside a maintenance window are excluded, matching
+ * `uptimeSince`. A monitor whose only recent checks were during planned
+ * downtime is therefore absent rather than reported at 0%.
  */
 export function uptimeSinceAll(cutoffs: number[]): Map<number, UptimeStats[]> {
   const out = new Map<number, UptimeStats[]>();
   if (cutoffs.length === 0) return out;
 
   // Placeholders bind in SQL text order: every column's cutoff first, then the
-  // widest one for the WHERE that bounds the scan.
+  // widest one for the WHERE that bounds the scan. The maintenance predicate
+  // takes no placeholder, so it does not disturb that ordering.
   const columns: string[] = [];
   const params: number[] = [];
   cutoffs.forEach((cutoff, i) => {
@@ -424,7 +510,9 @@ export function uptimeSinceAll(cutoffs: number[]): Map<number, UptimeStats[]> {
   // per call site, so this is as cacheable as a static string.
   const rows = prepared(
       `SELECT monitor_id, ${columns.join(', ')}
-       FROM checks WHERE checked_at >= ? GROUP BY monitor_id`,
+       FROM checks
+       WHERE checked_at >= ? AND maintenance_id IS NULL
+       GROUP BY monitor_id`,
     )
     .all(...params) as Row[];
 
@@ -512,6 +600,185 @@ export function listIncidents(limit = 50, monitorId?: number): Incident[] {
     : 'SELECT * FROM incidents ORDER BY started_at DESC LIMIT ?';
   const rows = (monitorId ? prepared(sql).all(monitorId, limit) : prepared(sql).all(limit)) as Row[];
   return rows.map(toIncident);
+}
+
+// --------------------------------------------------------------- maintenance
+
+/**
+ * A stored row becomes one arm of the union or the other.
+ *
+ * The columns the other strategy uses are NULL in the database, and they are
+ * absent from the object entirely rather than carried as nulls -- a 'once'
+ * window has no weekday bitmask, and nothing downstream should have to decide
+ * what one would have meant.
+ */
+function toMaintenanceRule(r: Row): MaintenanceRule {
+  const common = {
+    id: Number(r.id),
+    name: String(r.name),
+    timezone: String(r.timezone ?? ''),
+    active: Number(r.active) === 1,
+    createdAt: Number(r.created_at),
+    updatedAt: Number(r.updated_at),
+  };
+
+  if (String(r.strategy) === 'once') {
+    return { ...common, strategy: 'once', startsAt: Number(r.starts_at), endsAt: Number(r.ends_at) };
+  }
+  return {
+    ...common,
+    strategy: 'weekly',
+    startMin: Number(r.start_min),
+    durationS: Number(r.duration_s),
+    weekdays: Number(r.weekdays),
+  };
+}
+
+/** monitor ids per window, for the whole table in one query. */
+function monitorIdsByWindow(): Map<number, number[]> {
+  const rows = prepared(
+    'SELECT maintenance_id, monitor_id FROM monitor_maintenance ORDER BY monitor_id',
+  ).all() as Row[];
+
+  const out = new Map<number, number[]>();
+  for (const row of rows) {
+    const windowId = Number(row.maintenance_id);
+    const list = out.get(windowId);
+    if (list) list.push(Number(row.monitor_id));
+    else out.set(windowId, [Number(row.monitor_id)]);
+  }
+  return out;
+}
+
+/**
+ * Every window with the monitors it covers, in two queries.
+ *
+ * Two rather than one-per-window because this is what `/api/status` and
+ * `/metrics` call, and both are held to a fixed query count regardless of how
+ * many monitors or windows exist.
+ */
+export function listMaintenance(): MaintenanceWindow[] {
+  const rows = prepared('SELECT * FROM maintenance ORDER BY name COLLATE NOCASE').all() as Row[];
+  const idsByWindow = monitorIdsByWindow();
+  return rows.map((r) => {
+    const rule = toMaintenanceRule(r);
+    return { ...rule, monitorIds: idsByWindow.get(rule.id) ?? [] };
+  });
+}
+
+export function getMaintenance(id: number): MaintenanceWindow | null {
+  const r = prepared('SELECT * FROM maintenance WHERE id = ?').get(id) as Row | undefined;
+  if (!r) return null;
+  const monitorIds = (
+    prepared('SELECT monitor_id FROM monitor_maintenance WHERE maintenance_id = ? ORDER BY monitor_id')
+      .all(id) as Row[]
+  ).map((row) => Number(row.monitor_id));
+  return { ...toMaintenanceRule(r), monitorIds };
+}
+
+/**
+ * The active windows that cover one monitor.
+ *
+ * The scheduler asks this once per tick, so it returns rules without the
+ * reverse monitor list: that would be a second query per tick for an answer
+ * the check path never looks at. Inactive windows are filtered in SQL rather
+ * than in `isOpen` so a switched-off window costs nothing to skip.
+ */
+export function rulesCovering(monitorId: number): MaintenanceRule[] {
+  const rows = prepared(
+      `SELECT m.* FROM maintenance m
+       JOIN monitor_maintenance mm ON mm.maintenance_id = m.id
+       WHERE mm.monitor_id = ? AND m.active = 1`,
+    )
+    .all(monitorId) as Row[];
+  return rows.map(toMaintenanceRule);
+}
+
+/** Replace a window's monitor set. Callers already hold a transaction. */
+function setWindowMonitors(windowId: number, monitorIds: readonly number[]): void {
+  prepared('DELETE FROM monitor_maintenance WHERE maintenance_id = ?').run(windowId);
+  const insert = prepared(
+    'INSERT OR IGNORE INTO monitor_maintenance (monitor_id, maintenance_id) VALUES (?,?)',
+  );
+  for (const monitorId of monitorIds) insert.run(monitorId, windowId);
+}
+
+/** The nine schedule columns, with the unused strategy's half left NULL. */
+function scheduleColumns(input: MaintenanceInput): (string | number | null)[] {
+  const once = input.strategy === 'once';
+  return [
+    input.strategy,
+    once ? input.startsAt : null,
+    once ? input.endsAt : null,
+    once ? null : input.startMin,
+    once ? null : input.durationS,
+    once ? null : input.weekdays,
+    input.timezone,
+    bool(input.active),
+  ];
+}
+
+/**
+ * Create a window without opening a transaction.
+ *
+ * `transaction` is not reentrant -- SQLite has no nested BEGIN -- and the
+ * config importer does all of its work inside one already. So the writes live
+ * here and the wrapper below is for callers that are not in a transaction yet.
+ */
+export function createMaintenanceIn(input: MaintenanceInput): MaintenanceWindow {
+  const now = Date.now();
+  const info = prepared(
+      `INSERT INTO maintenance
+       (name, strategy, starts_at, ends_at, start_min, duration_s, weekdays, timezone, active,
+        created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+    )
+    .run(input.name, ...scheduleColumns(input), now, now);
+  const id = Number(info.lastInsertRowid);
+  setWindowMonitors(id, input.monitorIds);
+  return getMaintenance(id)!;
+}
+
+/** Create a window atomically. Do not call from inside a transaction. */
+export function createMaintenance(input: MaintenanceInput): MaintenanceWindow {
+  return transaction(() => ({ commit: true, value: createMaintenanceIn(input) }));
+}
+
+/**
+ * Replace a window wholesale, without opening a transaction.
+ *
+ * Not a column-by-column patch like `updateMonitor`: the schedule fields are a
+ * discriminated union, so a partial write could leave a row claiming to be
+ * 'weekly' with a start_min from its former life as a 'once'. The API layer
+ * merges a PATCH onto the stored window and hands the finished shape here.
+ */
+export function updateMaintenanceIn(id: number, input: MaintenanceInput): MaintenanceWindow | null {
+  if (getMaintenance(id) === null) return null;
+  prepared(
+      `UPDATE maintenance
+       SET name = ?, strategy = ?, starts_at = ?, ends_at = ?, start_min = ?, duration_s = ?,
+           weekdays = ?, timezone = ?, active = ?, updated_at = ?
+       WHERE id = ?`,
+    )
+    .run(input.name, ...scheduleColumns(input), Date.now(), id);
+  setWindowMonitors(id, input.monitorIds);
+  return getMaintenance(id);
+}
+
+/** Replace a window atomically. Do not call from inside a transaction. */
+export function updateMaintenance(id: number, input: MaintenanceInput): MaintenanceWindow | null {
+  return transaction(() => ({ commit: true, value: updateMaintenanceIn(id, input) }));
+}
+
+/**
+ * Delete a window.
+ *
+ * Checks it tagged keep their history and lose the tag (ON DELETE SET NULL),
+ * so a deleted window's downtime starts counting against uptime again. That is
+ * the honest reading: the operator has withdrawn the claim that it was planned.
+ */
+export function deleteMaintenance(id: number): boolean {
+  return Number(prepared('DELETE FROM maintenance WHERE id = ?').run(id).changes) > 0;
 }
 
 // ------------------------------------------------------------ dependencies

@@ -97,10 +97,10 @@ test('every status is emitted, with exactly one set to 1', () => {
     .split('\n')
     .filter((l) => l.startsWith(`sentinel_monitor_status{id="${monitor.id}",`));
 
-  // All five states present, so a PromQL query for a state a monitor is not in
+  // All six states present, so a PromQL query for a state a monitor is not in
   // returns 0 rather than an empty result.
-  assert.equal(samples.length, 5);
-  for (const s of ['up', 'down', 'pending', 'suppressed', 'paused']) {
+  assert.equal(samples.length, 6);
+  for (const s of ['up', 'down', 'pending', 'suppressed', 'paused', 'maintenance']) {
     assert.ok(
       samples.some((l) => l.includes(`status="${s}"`)),
       `expected a series for status="${s}"`,

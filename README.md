@@ -33,6 +33,7 @@ state, uptime and incident history. No config files are required after setup.
 - [Monitor types](#monitor-types)
 - [Monitor fields](#monitor-fields)
 - [Dependencies](#dependencies)
+- [Maintenance windows](#maintenance-windows)
 - [The alert state machine](#the-alert-state-machine)
 - [Environment variables](#environment-variables)
 - [REST API](#rest-api)
@@ -747,6 +748,116 @@ Dependencies nest to any depth. The rules:
 
 ---
 
+## Maintenance windows
+
+Planned downtime is not an outage, and it should not read like one. A
+maintenance window covers a set of monitors for a stretch of time; while it is
+open, those monitors are **still checked and their results are still stored**,
+but they cannot alert and their results do not count towards uptime.
+
+That is deliberately different from the two things it sits between:
+
+| | What it means | Checks run | Stored | Counts towards uptime | Alerts |
+|---|---|---|---|---|---|
+| **Paused** | Stop watching this, indefinitely | No | No | No | No |
+| **Maintenance** | Expected downtime, on a schedule | **Yes** | **Yes, tagged** | No | No |
+| **Suppressed** | A dependency is down, so the answer is unknowable | No | No | No | No |
+
+Checks taken inside a window are kept rather than skipped because they are
+still worth something: you can watch the service come back on the dashboard
+before the window closes, and prove it did. They are tagged with the window
+that was open, the uptime aggregates ignore tagged rows, and the sparkline
+draws them in the maintenance colour rather than the failure colour.
+
+### Two shapes
+
+Windows are either one-off or weekly. There is no cron, on purpose: it would
+mean a parser and a sixth production dependency for a feature whose real use is
+"every Sunday at 3am" and "next Tuesday evening".
+
+| Strategy | Fields | For |
+|---|---|---|
+| `once` | `startsAt`, `endsAt` (epoch ms, absolute) | A specific planned job |
+| `weekly` | `startMin`, `durationS`, `weekdays` | A recurring one |
+
+For a weekly window, `startMin` is minutes past local midnight (0–1439),
+`weekdays` is a bitmask where **bit 0 is Sunday** through bit 6 for Saturday,
+and `durationS` is between 60 seconds and 24 hours.
+
+`timezone` is an IANA name such as `Europe/London`; blank means the server's
+own zone. A name this system does not recognise is a 400 rather than a silent
+fallback, because a typo like `Europe/Londin` would otherwise put the window
+hours from where you meant it and never say so.
+
+### Duration is real time, not wall-clock
+
+A four-hour window is always four hours. Across a daylight-saving transition
+the local clock moves but the window does not stretch or shrink with it, and a
+window whose start time is deleted by a spring-forward jump still opens that
+day, shifted forward by the size of the gap, rather than being silently skipped
+once a year.
+
+### What happens at the edges
+
+- **An outage already underway when a window opens is closed silently.** The
+  incident timeline ends at the window rather than spanning it. Left open, the
+  first check after the window closed would compute downtime from the original
+  start and announce a recovery citing hours that were scheduled. Nothing is
+  sent: it was expected, not fixed.
+- **The failure streak resets**, so the first genuine failure after a window
+  closes opens a fresh incident with an honest start time.
+- **A manual "Check now" during a window still works.** It runs, it is stored,
+  it is tagged, and it stays silent. Asking "is it back yet" mid-window is
+  exactly who this is for.
+- **A window switched off (`active: false`) never opens**, which is how you
+  silence a recurring window without losing its definition.
+- **Deleting a window untags the checks it covered** rather than deleting them,
+  so that downtime starts counting again. You withdrew the claim that it was
+  planned.
+- **Paused beats maintenance.** A paused monitor reads as `paused` even inside
+  an open window.
+- **Dependencies are judged first.** While an ancestor is down the result is
+  unknowable, so there is nothing for a window to excuse.
+
+### Managing them
+
+The **Maintenance** button in the dashboard lists the windows, switches them on
+and off, and adds new ones. Over the API:
+
+| Method | Path | Does |
+|--------|------|------|
+| `GET` | `/api/maintenance` | Every window, with the monitor ids it covers |
+| `GET` | `/api/maintenance/:id` | One window |
+| `POST` | `/api/maintenance` | Create one |
+| `PATCH` | `/api/maintenance/:id` | Update one |
+| `DELETE` | `/api/maintenance/:id` | Delete one |
+
+```bash
+# Every Sunday at 03:00 London time, for an hour, covering monitors 3 and 4.
+curl -X POST http://localhost:8080/api/maintenance \
+  -H 'content-type: application/json' \
+  -d '{
+        "name": "Sunday NAS reboot",
+        "strategy": "weekly",
+        "startMin": 180,
+        "durationS": 3600,
+        "weekdays": 1,
+        "timezone": "Europe/London",
+        "monitorIds": [3, 4]
+      }'
+```
+
+A `PATCH` merges onto the stored window, so `{"active": false}` leaves the
+schedule alone. Switching `strategy`, though, has nothing to inherit: the new
+strategy's fields are required in the same request, because a half-converted
+window is not a shape the database can hold.
+
+Windows are included in [config export and import](#config-export-and-import),
+where the monitors they cover are recorded **by name** so a window survives the
+trip to an install where the ids are different.
+
+---
+
 ## The alert state machine
 
 What actually happens, tick by tick.
@@ -926,6 +1037,11 @@ curl -H 'Authorization: Bearer your-dashboard-password' \
 | `DELETE` | `/api/monitors/:id` | required | global | `204`. Cascades to its checks and incidents; children are orphaned, not deleted |
 | `POST` | `/api/monitors/:id/check` | required | **30 per minute** | Run a check right now and return its `CheckResult` |
 | `GET` | `/api/monitors/:id/checks` | required | global | Raw check rows, oldest-first. `?limit=` default 200, max 1000 |
+| `GET` | `/api/maintenance` | required | global | Every maintenance window, with the monitor ids it covers |
+| `POST` | `/api/maintenance` | required | global | Create one. `201` with the created window |
+| `GET` | `/api/maintenance/:id` | required | global | One window |
+| `PATCH` | `/api/maintenance/:id` | required | global | Merge onto the stored window; a strategy change needs that strategy's fields |
+| `DELETE` | `/api/maintenance/:id` | required | global | `204`. The checks it covered keep their history and start counting again |
 | `GET` | `/api/incidents` | required | global | Incident history with `monitorName` attached. `?limit=` default 50, max 500; `?monitorId=` filters |
 | `POST` | `/api/test-notification` | required | global | Send a test push. Optional body `{ "monitorId": n }` |
 | `GET` | `/api/config/export` | required | global | Every monitor as a portable JSON file. `?includeSecrets=true` includes header values |
@@ -1215,15 +1331,19 @@ All are gauges. Every one carries `id` (the monitor's numeric id) and `monitor`
 | `sentinel_monitors_down` | — | Monitors whose last check failed for long enough to count as down |
 | `sentinel_monitors_suppressed` | — | Monitors not being checked because an ancestor dependency is down |
 | `sentinel_monitors_paused` | — | Monitors that are paused |
+| `sentinel_monitors_maintenance` | — | Monitors inside an open maintenance window |
+| `sentinel_maintenance_windows_total` | — | Configured maintenance windows, active or not |
+| `sentinel_maintenance_windows_open` | — | Maintenance windows open right now |
 | `sentinel_incidents_open` | — | Incidents that have not been resolved |
 
 ### Alert on `status`, not on `up`
 
 `sentinel_monitor_up` is `0` for *every* state that is not up, including
-`paused`, `pending` (never checked yet) and `suppressed` (a dependency is down).
-A rule of `sentinel_monitor_up == 0` will therefore page you for monitors you
-deliberately paused, and will undo the dependency grouping. Use the state you
-actually mean:
+`paused`, `pending` (never checked yet), `suppressed` (a dependency is down) and
+`maintenance` (planned downtime). A rule of `sentinel_monitor_up == 0` will
+therefore page you for monitors you deliberately paused, will undo the
+dependency grouping, and will page you through every maintenance window you
+scheduled. Use the state you actually mean:
 
 ```yaml
 - alert: MonitorDown

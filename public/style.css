@@ -9,6 +9,7 @@
   --down: #f85149;
   --pending: #d29922;
   --paused: #6e7681;
+  --maintenance: #a371f7;
   --accent: #58a6ff;
   --radius: 10px;
 }
@@ -95,6 +96,13 @@ main { max-width: 1280px; margin: 0 auto; padding: 1.25rem; }
 .monitor.pending { border-left-color: var(--pending); }
 .monitor.suppressed { border-left-color: var(--accent); opacity: .72; }
 .suppressed .dot { background: var(--accent); }
+.monitor.maintenance { border-left-color: var(--maintenance); }
+.maintenance .dot { background: var(--maintenance); }
+.m-maintenance {
+  font-size: .8rem; color: var(--maintenance);
+  background: color-mix(in srgb, var(--maintenance) 10%, transparent);
+  border-radius: 6px; padding: .35rem .5rem;
+}
 .m-waiting {
   font-size: .8rem; color: var(--accent);
   background: color-mix(in srgb, var(--accent) 10%, transparent);
@@ -132,6 +140,9 @@ main { max-width: 1280px; margin: 0 auto; padding: 1.25rem; }
   display: block; transition: height .2s ease;
 }
 .spark i.bad { background: var(--down); opacity: 1; }
+/* A check taken inside a maintenance window. Distinct from a failure because
+   it is not one: it does not count towards uptime and it never alerted. */
+.spark i.maint { background: var(--maintenance); opacity: .85; }
 .spark i.empty { background: var(--line); height: 3px !important; }
 
 .m-actions { display: flex; gap: .35rem; flex-wrap: wrap; }
@@ -191,3 +202,17 @@ menu { display: flex; justify-content: flex-end; gap: .5rem; padding: 0; margin:
   background: var(--bg); z-index: 50;
 }
 .login-card { width: min(340px, 92vw); display: flex; flex-direction: column; gap: .85rem; }
+
+/* Maintenance window list inside the dialog. */
+.mw-row {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: .75rem;
+  padding: .55rem 0; border-bottom: 1px solid var(--line);
+}
+.mw-row:last-child { border-bottom: none; }
+.mw-text { display: flex; flex-direction: column; gap: .15rem; min-width: 0; }
+.mw-when { font-size: .78rem; color: var(--muted); }
+.mw-covers { font-size: .74rem; color: var(--muted); }
+.mw-off { font-size: .72rem; color: var(--pending); }
+.mw-actions { display: flex; gap: .35rem; flex: none; }
+.weekdays { display: flex; flex-wrap: wrap; gap: .1rem .7rem; }
+.weekdays .check { font-size: .8rem; }

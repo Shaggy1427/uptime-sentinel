@@ -12,11 +12,15 @@ import {
   openIncidentFor,
   pruneChecks,
   resolveIncident,
+  rulesCovering,
   db,
 } from './db.ts';
 import { runCheck } from './checks/index.ts';
 import { dispatch } from './notify/index.ts';
 import { config } from './config.ts';
+import { openRule } from './maintenance.ts';
+import { explain, policyFor } from './suppression.ts';
+import type { Suppression } from './suppression.ts';
 import type { CheckResult, Incident, Monitor, MonitorStatus } from './types.ts';
 
 interface RuntimeState {
@@ -30,6 +34,8 @@ interface RuntimeState {
   inFlight: boolean;
   /** Id of the ancestor currently blocking this monitor's checks. */
   suppressedBy: number | null;
+  /** The maintenance window currently covering this monitor, if any. */
+  maintenance: { id: number; name: string } | null;
 }
 
 /**
@@ -53,6 +59,7 @@ function freshState(): RuntimeState {
     nextCheckAt: null,
     inFlight: false,
     suppressedBy: null,
+    maintenance: null,
   };
 }
 
@@ -244,6 +251,25 @@ export class Scheduler {
       .map((m) => m.name);
   }
 
+  /** The dependency block, if any, in the shared suppression vocabulary. */
+  private dependencySuppression(monitor: Monitor, all?: Monitor[]): Suppression | null {
+    const ancestor = this.suppressor(monitor, all);
+    return ancestor === null ? null : { reason: 'dependency', by: { id: ancestor.id, name: ancestor.name } };
+  }
+
+  /**
+   * The maintenance window covering this monitor at `now`, if one is open.
+   *
+   * One indexed query per tick. Deliberately not hoisted into a cache
+   * refreshed by `sync()`: windows open and close on wall-clock time rather
+   * than on a CRUD event, so a cache would need its own timer to stay honest
+   * and would still be wrong for the width of that timer.
+   */
+  private maintenanceSuppression(monitor: Monitor, now: number): Suppression | null {
+    const rule = openRule(rulesCovering(monitor.id), now);
+    return rule === null ? null : { reason: 'maintenance', by: { id: rule.id, name: rule.name } };
+  }
+
   private async tick(monitorId: number): Promise<void> {
     const monitor = getMonitor(monitorId);
     if (!monitor || monitor.paused) {
@@ -258,15 +284,18 @@ export class Scheduler {
     // a few seconds of staleness is cosmetic.
     const monitors = listMonitors();
 
-    const blockedBy = this.suppressor(monitor, monitors);
-    if (blockedBy) {
+    // Dependencies are judged before maintenance: while an ancestor is down
+    // the result is unknowable, so there is nothing for a window to excuse.
+    const blocked = this.dependencySuppression(monitor, monitors);
+    if (blocked && !policyFor(blocked.reason).records) {
       const state = this.states.get(monitor.id) ?? freshState();
       this.states.set(monitor.id, state);
-      state.status = 'suppressed';
-      state.suppressedBy = blockedBy.id;
+      state.status = policyFor(blocked.reason).status;
+      state.suppressedBy = blocked.by.id;
       // Deliberately no check, no stored result: an unreachable dependency
       // makes the answer unknowable, and recording a failure would both spam
       // alerts and corrupt the uptime figure with an outage that is not ours.
+      // Maintenance is the other case -- see execute(), which still records.
       if (this.running) this.schedule(monitor, monitor.intervalS * 1000);
       return;
     }
@@ -292,20 +321,19 @@ export class Scheduler {
     // the same, or it records a not-our-fault failure into the uptime figure and
     // fires a DOWN alert for something the operator already knows about.
     const monitors = listMonitors();
-    const blockedBy = this.suppressor(monitor, monitors);
-    if (blockedBy) {
+    const blocked = this.dependencySuppression(monitor, monitors);
+    if (blocked && !policyFor(blocked.reason).records) {
       const state = this.states.get(monitor.id) ?? freshState();
       this.states.set(monitor.id, state);
-      state.status = 'suppressed';
-      state.suppressedBy = blockedBy.id;
-      return {
-        ok: false,
-        statusCode: null,
-        latencyMs: null,
-        error: `Not checked: "${blockedBy.name}" is down`,
-      };
+      state.status = policyFor(blocked.reason).status;
+      state.suppressedBy = blocked.by.id;
+      return { ok: false, statusCode: null, latencyMs: null, error: explain(blocked) };
     }
 
+    // A manual check during maintenance is allowed and is recorded, tagged
+    // like any other: the operator asking "is it back yet" mid-window is
+    // exactly who this feature is for. execute() keeps it out of the uptime
+    // figure and out of the alert path.
     return this.execute(monitor, monitors);
   }
 
@@ -331,14 +359,24 @@ export class Scheduler {
       const current = getMonitor(monitor.id);
       if (!current) return result;
 
+      // Resolved against the same `now` the row is stamped with, so a window
+      // that opens mid-check cannot tag the row and then be judged closed.
+      const maintenance = this.maintenanceSuppression(current, now);
+      state.maintenance = maintenance === null ? null : maintenance.by;
+
       try {
-        insertCheck(current.id, result, now);
+        insertCheck(current.id, result, now, maintenance === null ? null : maintenance.by.id);
         state.lastResult = result;
         state.lastCheckedAt = now;
 
         // Paused while the check was running: record the result, but treat the
         // monitor as inert and do not open/resolve incidents or send alerts.
         if (current.paused) return result;
+
+        if (maintenance !== null) {
+          this.holdForMaintenance(current, state, maintenance, now);
+          return result;
+        }
 
         if (result.ok) await this.handleUp(current, state, now, monitors);
         else await this.handleDown(current, state, result, now, monitors);
@@ -350,6 +388,44 @@ export class Scheduler {
     } finally {
       state.inFlight = false;
     }
+  }
+
+  /**
+   * Hold a monitor inert for the length of a maintenance window.
+   *
+   * The check ran and the row is stored -- tagged, so it never reaches the
+   * uptime figure -- but nothing else happens: no incident is opened, no
+   * alert is dispatched, and no reminder fires.
+   *
+   * Any incident already open is closed silently, mirroring what pausing
+   * does and for the same reason. Left open, it would go on accruing across
+   * the window, and the first check after the window closed would compute
+   * downtime from the original startedAt and emit a RECOVERED citing hours
+   * that were scheduled. Silent because the outage was expected, not fixed.
+   *
+   * The failure streak is dropped for the same reason: the window should end
+   * with the monitor judged from scratch, so the first real failure after it
+   * opens a fresh incident with an honest startedAt.
+   */
+  private holdForMaintenance(
+    monitor: Monitor,
+    state: RuntimeState,
+    maintenance: Suppression,
+    now: number,
+  ): void {
+    state.status = policyFor(maintenance.reason).status;
+
+    const incident = openIncidentFor(monitor.id);
+    if (incident) {
+      resolveIncident(incident.id, now);
+      console.log(
+        `[scheduler] "${monitor.name}" entered maintenance "${maintenance.by.name}" ` +
+          'with an open incident; closed it silently',
+      );
+    }
+
+    state.consecutiveFailures = 0;
+    state.firstFailureAt = null;
   }
 
   private async handleUp(monitor: Monitor, state: RuntimeState, now: number, monitors?: Monitor[]): Promise<void> {
