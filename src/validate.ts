@@ -68,9 +68,15 @@ export function validateMonitor(input: unknown, { partial, current, graph }: Val
   const has = (k: string) => k in raw && raw[k] !== undefined;
 
   if (has('name')) {
-    const name = String(raw.name).trim();
+    const trimmed = String(raw.name).trim();
+    if (!trimmed) throw new ValidationError('name is required');
+    if (trimmed.length > 120) throw new ValidationError('name must be 120 characters or fewer');
+    // Strip C0 controls (except TAB), C1 controls, and DEL. A monitor name
+    // with a newline or carriage return inside it can fake a log line, an
+    // ntfy notification, or a CLI banner. TAB and printable Unicode are
+    // preserved so legitimate names ("Device #5 — web") keep working.
+    const name = trimmed.replace(/[\x00-\x08\x0A-\x1F\x7F-\x9F]/g, '');
     if (!name) throw new ValidationError('name is required');
-    if (name.length > 120) throw new ValidationError('name must be 120 characters or fewer');
     out.name = name;
   } else if (!partial) throw new ValidationError('name is required');
 

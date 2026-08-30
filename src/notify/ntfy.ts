@@ -1,5 +1,5 @@
 import { config } from '../config.ts';
-import { formatDuration, headerSafe } from '../format.ts';
+import { bodySafe, formatDuration, headerSafe } from '../format.ts';
 import type { Channel, NotificationEvent } from './types.ts';
 
 const TAGS: Record<NotificationEvent['kind'], string> = {
@@ -74,7 +74,7 @@ export const ntfyChannel: Channel = {
     const res = await fetch(url, {
       method: 'POST',
       headers,
-      body: body(event),
+      body: bodySafe(body(event)),
       signal: AbortSignal.timeout(15_000),
     });
 

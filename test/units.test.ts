@@ -177,3 +177,36 @@ test('validateMonitor rejects keyword with HEAD and non-string header values', (
   // deliberately, so they are not deep-equal to a plain object literal.
   assert.deepEqual({ ...ok.headers }, { a: 'b' });
 });
+
+test('validateMonitor strips control characters from monitor names', () => {
+  const base = { type: 'http' as const, target: 'http://example.invalid/' };
+
+  // Each control character is removed; the printable parts concatenate.
+  const out = validateMonitor({ ...base, name: 'A\nB\tC' }, { partial: false });
+  assert.equal(out.name, 'AB\tC', `tab is allowed; newline is not, got ${JSON.stringify(out.name)}`);
+
+  // A name that is only control characters becomes empty and is rejected.
+  assert.throws(() => validateMonitor({ ...base, name: '\x00\x01' }, { partial: false }), ValidationError);
+  assert.throws(() => validateMonitor({ ...base, name: '\r\n' }, { partial: false }), ValidationError);
+
+  // C1 controls (0x80-0x9F) are stripped.
+  const c1 = validateMonitor({ ...base, name: 'OK\u0080bad' }, { partial: false });
+  assert.equal(c1.name, 'OKbad');
+
+  // ASCII DEL is stripped; leading/trailing whitespace is trimmed.
+  const del = validateMonitor({ ...base, name: '  hi\u007F  ' }, { partial: false });
+  assert.equal(del.name, 'hi');
+
+  // Non-ASCII letters (e.g. accented Latin) are preserved.
+  const unicode = validateMonitor({ ...base, name: 'café' }, { partial: false });
+  assert.equal(unicode.name, 'café');
+});
+
+test('bodySafe keeps newlines and tabs, strips the rest', async () => {
+  const { bodySafe } = await import('../src/format.ts');
+  assert.equal(bodySafe('a\nb\tc'), 'a\nb\tc', 'LF and TAB are preserved');
+  assert.equal(bodySafe('a\x00b\x01c'), 'abc', 'C0 controls are stripped');
+  assert.equal(bodySafe('a\u0080b\u009Fc'), 'abc', 'C1 controls are stripped');
+  assert.equal(bodySafe('a\x7Fb'), 'ab', 'DEL is stripped');
+  assert.equal(bodySafe('café'), 'café', 'non-ASCII letters are preserved');
+});
