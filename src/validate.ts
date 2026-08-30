@@ -201,7 +201,15 @@ export function validateMonitor(input: unknown, { partial, current, graph }: Val
     if (operator !== 'exists' && operator !== 'not_exists' && (expected === null || expected === '')) {
       throw new ValidationError(`jsonExpected is required when jsonOperator is "${operator}"`);
     }
-    if (!has('jsonOperator') && !current?.jsonOperator) out.jsonOperator = 'exists';
+    // A json monitor always needs an operator. Default it on create, and turn an
+    // explicit clear (jsonOperator: null) back into the default rather than
+    // storing null -- but never overwrite the operator a stored monitor already
+    // has when this patch does not mention it.
+    if (has('jsonOperator')) {
+      if (out.jsonOperator === null) out.jsonOperator = 'exists';
+    } else if (!current?.jsonOperator) {
+      out.jsonOperator = 'exists';
+    }
   }
 
   if (has('parentId')) {
