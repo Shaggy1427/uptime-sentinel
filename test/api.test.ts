@@ -11,6 +11,7 @@ process.env.AUTH_PASSWORD = '';
 
 // Imported after env is set: config and the database are read at module load.
 const { buildServer } = await import('../src/server.ts');
+const store = await import('../src/db.ts');
 
 let app: Awaited<ReturnType<typeof buildServer>>;
 
@@ -186,4 +187,63 @@ test('/api/status resolves parent name and dependent count from one monitor list
   assert.equal(byName.get('Child B').dependentCount, 0);
 
   for (const m of status.monitors) await app.inject({ method: 'DELETE', url: `/api/monitors/${m.id}` });
+});
+
+test('/api/status batches history, uptime windows and open incidents', async () => {
+  const mk = async (name: string) =>
+    (
+      await app.inject({
+        method: 'POST',
+        url: '/api/monitors',
+        payload: { name, type: 'tcp', target: '127.0.0.1:9', intervalS: 3600 },
+      })
+    ).json();
+
+  const a = await mk('Alpha');
+  const b = await mk('Beta');
+
+  const now = Date.now();
+  const DAY = 86_400_000;
+  // Alpha: 3 checks inside the day window (2 ok, 1 fail) + 1 old one outside the month window.
+  store.insertCheck(a.id, { ok: true, statusCode: 200, latencyMs: 10, error: null }, now - 3000);
+  store.insertCheck(a.id, { ok: false, statusCode: 500, latencyMs: null, error: 'boom' }, now - 2000);
+  store.insertCheck(a.id, { ok: true, statusCode: 200, latencyMs: 30, error: null }, now - 1000);
+  store.insertCheck(a.id, { ok: true, statusCode: 200, latencyMs: 20, error: null }, now - 40 * DAY);
+  // Beta: healthy, no incident.
+  store.insertCheck(b.id, { ok: true, statusCode: 200, latencyMs: 5, error: null }, now - 1000);
+
+  store.createIncident(a.id, now - 2500, 'boom');
+
+  const status = (await app.inject({ method: 'GET', url: '/api/status' })).json();
+  const byName = new Map(status.monitors.map((m: { name: string }) => [m.name, m]));
+  const alpha = byName.get('Alpha') as any;
+  const beta = byName.get('Beta') as any;
+
+  // history is oldest-first (all four of Alpha's checks fit under the 40 cap),
+  // and carries only this monitor's rows.
+  assert.deepEqual(
+    alpha.history.map((h: { checkedAt: number }) => h.checkedAt),
+    [now - 40 * DAY, now - 3000, now - 2000, now - 1000],
+  );
+  assert.equal(alpha.lastCheckedAt, now - 1000);
+  assert.equal(
+    (beta.history as unknown[]).length,
+    1,
+    'Beta history is not contaminated by Alpha rows',
+  );
+
+  // day/week count the 3 recent; month excludes the 40-day-old row too.
+  assert.equal(alpha.uptime.day.total, 3);
+  assert.equal(alpha.uptime.day.up, 2);
+  assert.equal(alpha.uptime.week.total, 3);
+  assert.equal(alpha.uptime.month.total, 3);
+
+  // open incident wired through from the single batched scan.
+  assert.ok(alpha.incident && alpha.incident.cause === 'boom');
+  assert.ok(alpha.downSinceMs >= 2500 && alpha.downSinceMs < 60_000);
+  assert.equal(beta.incident, null);
+  assert.equal(beta.downSinceMs, null);
+  assert.equal(beta.uptime.day.total, 1);
+
+  for (const m of [a, b]) await app.inject({ method: 'DELETE', url: `/api/monitors/${m.id}` });
 });
