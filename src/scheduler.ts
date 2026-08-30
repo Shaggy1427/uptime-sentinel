@@ -6,6 +6,7 @@ import {
   getMonitor,
   insertCheck,
   listMonitors,
+  listOpenIncidents,
   markIncidentAlerted,
   markIncidentReminded,
   openIncidentFor,
@@ -16,7 +17,7 @@ import {
 import { runCheck } from './checks/index.ts';
 import { dispatch } from './notify/index.ts';
 import { config } from './config.ts';
-import type { CheckResult, Monitor, MonitorStatus } from './types.ts';
+import type { CheckResult, Incident, Monitor, MonitorStatus } from './types.ts';
 
 interface RuntimeState {
   status: MonitorStatus;
@@ -79,12 +80,22 @@ export class Scheduler {
 
   /** Restore DOWN state across restarts so an open incident is not re-alerted from zero. */
   private rehydrate(): void {
+    // One scan for every open incident, instead of one query per monitor.
+    // /api/status already does this; the startup path that should mirror it
+    // was still paying N+1.
+    const incidentByMonitor = new Map<number, Incident>();
+    for (const incident of listOpenIncidents()) {
+      // listOpenIncidents is newest-first, so the first one seen per monitor is
+      // the one openIncidentFor would have returned.
+      if (!incidentByMonitor.has(incident.monitorId)) incidentByMonitor.set(incident.monitorId, incident);
+    }
+
     for (const monitor of listMonitors()) {
       const state = freshState();
       if (monitor.paused) {
         state.status = 'paused';
       } else {
-        const incident = openIncidentFor(monitor.id);
+        const incident = incidentByMonitor.get(monitor.id);
         if (incident) {
           state.status = 'down';
           state.firstFailureAt = incident.startedAt;
