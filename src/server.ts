@@ -148,11 +148,11 @@ function describe(monitor: Monitor, ctx: StatusContext) {
   };
 }
 
-export async function buildServer() {
+export async function buildServer(options?: { trustProxy?: boolean }) {
   const app = Fastify({
     logger: { level: process.env.LOG_LEVEL ?? 'warn' },
     bodyLimit: 256 * 1024,
-    trustProxy: config.trustProxy,
+    trustProxy: options?.trustProxy ?? config.trustProxy,
   });
 
   await app.register(fastifyCookie, { secret: cookieSecret() });
@@ -237,9 +237,13 @@ export async function buildServer() {
         httpOnly: true,
         sameSite: 'lax',
         signed: true,
-        // Set automatically when the dashboard is served over TLS, so the
-        // session cookie is never sent in the clear behind a proxy.
-        secure: config.publicUrl.startsWith('https://'),
+        // Tie Secure to the actual transport, not to whether PUBLIC_URL starts
+        // with https://. Operators behind an HTTPS reverse proxy who leave
+        // PUBLIC_URL at its http://... default would otherwise get a session
+        // cookie without Secure, which is downgradable on the wire. Fastify
+        // populates req.protocol from X-Forwarded-Proto when trustProxy is on,
+        // so this is correct behind a TLS-terminating proxy as well.
+        secure: req.protocol === 'https',
         maxAge: 30 * 24 * 60 * 60,
       });
       return { ok: true };
