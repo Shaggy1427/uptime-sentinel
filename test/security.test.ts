@@ -141,3 +141,21 @@ test('header names cannot reach the prototype, and values cannot inject a line',
   assert.throws(() => validateMonitor({ ...base, headers: { 'Bad Name': 'v' } }, { partial: false }), ValidationError);
   assert.throws(() => validateMonitor({ ...base, headers: { 'X-A': 'v\r\nX-Injected: 1' } }, { partial: false }), ValidationError);
 });
+
+test('every response carries the security headers from @fastify/helmet', async () => {
+  const res = await app.inject({ method: 'GET', url: '/api/health' });
+  assert.equal(res.statusCode, 200);
+
+  const csp = res.headers['content-security-policy'];
+  assert.ok(typeof csp === 'string' && csp.includes("default-src 'self'"), `unexpected CSP: ${csp}`);
+  assert.ok(csp.includes("frame-ancestors 'none'"), 'CSP must forbid framing to prevent clickjacking');
+  assert.ok(csp.includes("connect-src 'self'"), 'CSP must restrict XHR destinations');
+
+  const hsts = res.headers['strict-transport-security'];
+  assert.ok(typeof hsts === 'string' && /max-age=\d{7,}/.test(hsts), `unexpected HSTS: ${hsts}`);
+
+  // X-Content-Type-Options: nosniff and X-Frame-Options are helmet defaults.
+  assert.equal(res.headers['x-content-type-options'], 'nosniff');
+  assert.equal(res.headers['x-frame-options'], 'SAMEORIGIN');
+  assert.equal(res.headers['referrer-policy'], 'no-referrer');
+});

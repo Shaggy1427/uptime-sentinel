@@ -4,6 +4,7 @@ import Fastify from 'fastify';
 import type { FastifyError } from 'fastify';
 import fastifyStatic from '@fastify/static';
 import fastifyCookie from '@fastify/cookie';
+import fastifyHelmet from '@fastify/helmet';
 import fastifyRateLimit from '@fastify/rate-limit';
 import { config, VERSION } from './config.ts';
 import * as store from './db.ts';
@@ -150,6 +151,30 @@ export async function buildServer() {
 
   await app.register(fastifyCookie, { secret: cookieSecret() });
   await app.register(fastifyStatic, { root: publicDir, prefix: '/' });
+
+  // Security headers: a self-only CSP, HSTS, framebusting and nosniff. The
+  // dashboard only loads its own /app.js and /style.css and never needs to
+  // frame third-party content, so the tightest policy is also the right one.
+  // Helmet defaults to X-Frame-Options: SAMEORIGIN; the CSP `frame-ancestors
+  // 'none'` is the modern equivalent and is what the browser actually consults
+  // now. The /metrics endpoint serves text/plain -- nosniff stops old browsers
+  // from guessing a different content type and re-rendering it as HTML.
+  await app.register(fastifyHelmet, {
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'"],
+        styleSrc: ["'self'"],
+        imgSrc: ["'self'", 'data:'],
+        connectSrc: ["'self'"],
+        frameAncestors: ["'none'"],
+        baseUri: ["'self'"],
+        formAction: ["'self'"],
+      },
+    },
+    strictTransportSecurity: { maxAge: 63_072_000, includeSubDomains: true },
+    referrerPolicy: { policy: 'no-referrer' },
+  });
 
   await app.register(fastifyRateLimit, {
     // A generous ceiling for everything, with tighter caps on the two routes
