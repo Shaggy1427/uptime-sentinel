@@ -197,6 +197,7 @@ export function createMonitor(input: MonitorInput): Monitor {
       now,
       now,
     );
+  invalidateMonitorCache();
   return getMonitor(Number(info.lastInsertRowid))!;
 }
 
@@ -222,6 +223,20 @@ const UPDATABLE: Record<string, string> = {
   paused: 'paused',
 };
 
+// Cached monitor list, invalidated on monitor CRUD.
+let cachedMonitors: Monitor[] | null = null;
+
+export function invalidateMonitorCache(): void {
+  cachedMonitors = null;
+}
+
+export function listMonitors(): Monitor[] {
+  if (cachedMonitors === null) {
+    cachedMonitors = (db.prepare('SELECT * FROM monitors ORDER BY name COLLATE NOCASE').all() as Row[]).map(toMonitor);
+  }
+  return cachedMonitors;
+}
+
 export function updateMonitor(id: number, patch: Partial<MonitorInput>): Monitor | null {
   const sets: string[] = [];
   const values: (string | number | null)[] = [];
@@ -237,11 +252,14 @@ export function updateMonitor(id: number, patch: Partial<MonitorInput>): Monitor
   sets.push('updated_at = ?');
   values.push(Date.now(), id);
   db.prepare(`UPDATE monitors SET ${sets.join(', ')} WHERE id = ?`).run(...values);
+  invalidateMonitorCache();
   return getMonitor(id);
 }
 
 export function deleteMonitor(id: number): boolean {
-  return Number(db.prepare('DELETE FROM monitors WHERE id = ?').run(id).changes) > 0;
+  const removed = Number(db.prepare('DELETE FROM monitors WHERE id = ?').run(id).changes) > 0;
+  if (removed) invalidateMonitorCache();
+  return removed;
 }
 
 // -------------------------------------------------------------------- checks
