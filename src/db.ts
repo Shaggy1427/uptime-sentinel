@@ -197,6 +197,19 @@ export function getMonitor(id: number): Monitor | null {
   return r ? toMonitor(r) : null;
 }
 
+/**
+ * Just the fields the scheduler re-reads around a check: whether the monitor
+ * is still there, still unpaused, and its interval.
+ *
+ * The full getMonitor maps every column and JSON.parses stored headers; the
+ * post-check re-reads only ever consult paused and intervalS, so they can
+ * skip the rest.
+ */
+export function getMonitorRuntime(id: number): { paused: boolean; intervalS: number } | null {
+  const r = db.prepare('SELECT interval_s, paused FROM monitors WHERE id = ?').get(id) as Row | undefined;
+  return r ? { paused: Number(r.paused) === 1, intervalS: Number(r.interval_s) } : null;
+}
+
 export function createMonitor(input: MonitorInput): Monitor {
   const now = Date.now();
   const d = config.defaults;

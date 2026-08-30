@@ -4,6 +4,7 @@ import {
   createIncident,
   descendantsOf,
   getMonitor,
+  getMonitorRuntime,
   insertCheck,
   listMonitors,
   markIncidentAlerted,
@@ -147,7 +148,7 @@ export class Scheduler {
     return Math.floor(Math.random() * Math.min(monitor.intervalS * 1000, 5000));
   }
 
-  private schedule(monitor: Monitor, delayMs: number): void {
+  private schedule(monitor: Pick<Monitor, 'id' | 'intervalS'>, delayMs: number): void {
     const existing = this.timers.get(monitor.id);
     if (existing) clearTimeout(existing);
 
@@ -213,9 +214,12 @@ export class Scheduler {
     await this.execute(monitor);
     // Re-read after the (possibly long) check: the monitor may have been
     // paused or deleted while the check was in flight, in which case the
-    // stale snapshot must not resurrect its timer.
-    const current = getMonitor(monitorId);
-    if (this.running && current && !current.paused) this.schedule(current, current.intervalS * 1000);
+    // stale snapshot must not resurrect its timer. Only the scheduling
+    // fields are needed here, so skip the full row mapping.
+    const current = getMonitorRuntime(monitorId);
+    if (this.running && current && !current.paused) {
+      this.schedule({ id: monitorId, intervalS: current.intervalS }, current.intervalS * 1000);
+    }
   }
 
   /** Run a check right now, outside the schedule (used by the "Check now" button). */
