@@ -21,10 +21,31 @@ export const VERSION = '0.1.0';
 
 const dataDir = path.resolve(str('DATA_DIR', './data'));
 
+/**
+ * An http(s) origin, trailing slashes stripped, or '' when unset. Rejects a
+ * non-URL or a non-http scheme rather than accepting it silently: it flows into
+ * the cookie `secure` flag, the ntfy `Click` header and the heartbeat target,
+ * all of which quietly misbehave on garbage.
+ */
+function publicUrl(key: string): string {
+  const v = str(key, '');
+  if (v === '') return '';
+  let parsed: URL;
+  try {
+    parsed = new URL(v);
+  } catch {
+    throw new Error(`Env ${key} must be a valid URL, got "${v}"`);
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(`Env ${key} must be an http(s) URL, got "${v}"`);
+  }
+  return v.replace(/\/+$/, '');
+}
+
 export const config = {
   port: int('PORT', 8080, 1, 65_535),
   host: str('HOST', '0.0.0.0'),
-  publicUrl: str('PUBLIC_URL', '').replace(/\/+$/, ''),
+  publicUrl: publicUrl('PUBLIC_URL'),
   authPassword: str('AUTH_PASSWORD', ''),
   // Behind a reverse proxy, honour X-Forwarded-For so rate limits are keyed on
   // the real client rather than on the proxy. Only enable when a proxy you
