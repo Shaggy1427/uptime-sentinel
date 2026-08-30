@@ -389,6 +389,145 @@ async function submitLogin(event) {
   }
 }
 
+// ------------------------------------------------------------ export/import
+
+// The parsed file that the shown preview belongs to, so Apply can only ever
+// send exactly what was previewed.
+let importPayload = null;
+
+function download(filename, text) {
+  const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+  const link = el('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  // Revoked on the next tick rather than immediately: the URL has to still
+  // resolve while the browser is handling the click.
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+async function doExport(event) {
+  event.preventDefault();
+  const includeSecrets = $('#export-form').elements.includeSecrets.checked;
+  try {
+    const file = await api(`/api/config/export${includeSecrets ? '?includeSecrets=true' : ''}`);
+    download(`uptime-sentinel-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(file, null, 2));
+    $('#export').close();
+    const count = file.monitors.length;
+    banner(`Exported ${count} monitor${count === 1 ? '' : 's'}${includeSecrets ? ', credentials included' : ''}.`, 'ok');
+  } catch (err) {
+    banner(err.message, 'err');
+  }
+}
+
+/**
+ * Unlike api(), a rejected import is a 400 whose body is the full report, and
+ * that report is the useful part -- so it is returned rather than thrown.
+ */
+async function importRequest(payload, dryRun) {
+  const res = await fetch(`/api/config/import${dryRun ? '?dryRun=true' : ''}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (res.status === 401) {
+    showLogin();
+    throw new Error('Unauthorized');
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok && !Array.isArray(data.errors)) throw new Error(data.error || `Request failed (${res.status})`);
+  return data;
+}
+
+function renderImportReport(report) {
+  const host = $('#import-report');
+  host.replaceChildren();
+
+  const line = (label, names, className) => {
+    if (names.length === 0) return;
+    host.appendChild(el('p', className || 'report-line', `${label}: ${names.join(', ')}`));
+  };
+
+  line('Add', report.created);
+  line('Update', report.updated);
+  line('Unchanged', report.unchanged);
+  line(
+    'Skipped',
+    report.skipped.map((s) => `${s.name} (${s.reason})`),
+    'report-line warn',
+  );
+  line('Credentials to re-enter afterwards', report.needCredentials, 'report-line warn');
+  for (const message of report.errors) host.appendChild(el('p', 'report-line error', message));
+
+  if (host.childElementCount === 0) {
+    host.appendChild(el('p', 'report-line', 'Nothing to do: this file matches what is already here.'));
+  }
+  host.classList.remove('hidden');
+}
+
+async function previewImport(file) {
+  const error = $('#import-error');
+  error.classList.add('hidden');
+  $('#import-report').classList.add('hidden');
+  $('#import-apply').disabled = true;
+  importPayload = null;
+
+  let parsed;
+  try {
+    parsed = JSON.parse(await file.text());
+  } catch {
+    error.textContent = 'That file is not valid JSON.';
+    error.classList.remove('hidden');
+    return;
+  }
+
+  try {
+    const report = await importRequest(parsed, true);
+    renderImportReport(report);
+    if (report.errors.length === 0) {
+      importPayload = parsed;
+      $('#import-apply').disabled = false;
+    }
+  } catch (err) {
+    error.textContent = err.message;
+    error.classList.remove('hidden');
+  }
+}
+
+async function applyImport(event) {
+  event.preventDefault();
+  if (!importPayload) return;
+
+  const button = $('#import-apply');
+  button.disabled = true;
+  try {
+    const report = await importRequest(importPayload, false);
+    if (report.errors.length > 0) {
+      renderImportReport(report);
+      return;
+    }
+    $('#import').close();
+    banner(`Imported: ${report.created.length} added, ${report.updated.length} updated.`, 'ok');
+    await refresh();
+  } catch (err) {
+    const error = $('#import-error');
+    error.textContent = err.message;
+    error.classList.remove('hidden');
+    button.disabled = false;
+  }
+}
+
+function openImport() {
+  $('#import-form').reset();
+  $('#import-report').classList.add('hidden');
+  $('#import-error').classList.add('hidden');
+  $('#import-apply').disabled = true;
+  importPayload = null;
+  $('#import').showModal();
+}
+
 // -------------------------------------------------------------------- boot
 
 async function refresh() {
@@ -412,6 +551,21 @@ $('#editor-form').addEventListener('submit', saveEditor);
 $('#editor-form').elements.type.addEventListener('change', syncEditorType);
 $('#editor-form').elements.jsonOperator.addEventListener('change', syncJsonOperator);
 $('#login-form').addEventListener('submit', submitLogin);
+
+$('#btn-export').onclick = () => {
+  $('#export-form').reset();
+  $('#export').showModal();
+};
+$('#export-cancel').onclick = () => $('#export').close();
+$('#export-form').addEventListener('submit', doExport);
+
+$('#btn-import').onclick = openImport;
+$('#import-cancel').onclick = () => $('#import').close();
+$('#import-form').addEventListener('submit', applyImport);
+$('#import-file').addEventListener('change', (event) => {
+  const file = event.target.files?.[0];
+  if (file) previewImport(file).catch((err) => banner(err.message, 'err'));
+});
 
 $('#btn-test').onclick = async () => {
   const btn = $('#btn-test');

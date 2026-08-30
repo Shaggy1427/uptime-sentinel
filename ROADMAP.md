@@ -45,7 +45,10 @@ good next issues. Each entry notes the files you would touch.
 
 - [x] **External heartbeat** — done. `HEARTBEAT_URL` pings an external
       dead-man's-switch, withheld when the check loop stalls.
-- [ ] **Config export / import** — download all monitors as JSON from the UI.
+- [x] **Config export / import** — done. `/api/config/export` and
+      `/api/config/import` with Export/Import buttons on the dashboard. Merges
+      by name, previews with `dryRun`, and withholds credentials unless
+      `includeSecrets` is asked for. Logic in `src/config-io.ts`.
 - [ ] **Backup the database** — a periodic `VACUUM INTO` to a dated file.
 
 ## Testing

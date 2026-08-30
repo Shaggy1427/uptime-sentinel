@@ -13,6 +13,7 @@ import { validateMonitor, ValidationError } from './validate.ts';
 import type { ValidateOptions } from './validate.ts';
 import { cookieSecret, secretEquals } from './secret.ts';
 import { renderMetrics } from './metrics.ts';
+import { exportConfig, importConfig } from './config-io.ts';
 import type { Monitor } from './types.ts';
 
 const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
@@ -20,10 +21,7 @@ const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 
 const DAY = 86_400_000;
 
 /** Dependency-graph access handed to the validator; see ValidateOptions.graph. */
-const GRAPH: NonNullable<ValidateOptions['graph']> = {
-  exists: (id) => store.getMonitor(id) !== null,
-  wouldCreateCycle: (selfId, parentId) => store.wouldCreateCycle(selfId, parentId),
-};
+const GRAPH: NonNullable<ValidateOptions['graph']> = store.graph;
 const AUTH_COOKIE = 'sentinel_auth';
 const OPEN_ROUTES = new Set(['/api/health', '/api/login', '/api/auth']);
 
@@ -228,6 +226,33 @@ export async function buildServer() {
     reply.header('content-type', 'text/plain; version=0.0.4; charset=utf-8');
     return renderMetrics();
   });
+
+  // --------------------------------------------------------- config in/out
+
+  // Header values are withheld unless includeSecrets is asked for explicitly,
+  // so the ordinary export is a file you can paste into an issue, and a real
+  // backup has to be requested on purpose.
+  app.get<{ Querystring: { includeSecrets?: string } }>('/api/config/export', async (req, reply) => {
+    const includeSecrets = req.query.includeSecrets === 'true';
+    const stamp = new Date().toISOString().slice(0, 10);
+    // For curl -OJ and for hitting the URL directly; the dashboard reads the
+    // JSON body and names the file itself.
+    reply.header('content-disposition', `attachment; filename="uptime-sentinel-${stamp}.json"`);
+    return exportConfig({ includeSecrets });
+  });
+
+  // A burst of writes, so it gets the same treatment as the manual check.
+  app.post<{ Querystring: { dryRun?: string } }>(
+    '/api/config/import',
+    { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } },
+    async (req, reply) => {
+      const dryRun = req.query.dryRun === 'true';
+      const report = importConfig(req.body, { dryRun });
+      if (report.errors.length > 0) return reply.code(400).send(report);
+      if (!dryRun) scheduler.sync();
+      return report;
+    },
+  );
 
   // -------------------------------------------------------------- monitors
 

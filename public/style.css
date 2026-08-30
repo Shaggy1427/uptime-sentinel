@@ -167,6 +167,19 @@ menu { display: flex; justify-content: flex-end; gap: .5rem; padding: 0; margin:
 .error { color: var(--down); font-size: .85rem; }
 .hidden { display: none !important; }
 
+.hint { color: var(--muted); font-size: .82rem; margin: 0 0 .85rem; }
+.hint.warn { color: var(--pending); }
+
+/* The import preview: what would change, before anything is written. */
+.report {
+  border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--panel-2); padding: .6rem .75rem; margin: .85rem 0;
+  max-height: 40vh; overflow-y: auto;
+}
+.report-line { margin: 0 0 .3rem; font-size: .82rem; line-height: 1.45; word-break: break-word; }
+.report-line:last-child { margin-bottom: 0; }
+.report-line.warn { color: var(--pending); }
+
 .overlay {
   position: fixed; inset: 0; display: grid; place-items: center;
   background: var(--bg); z-index: 50;

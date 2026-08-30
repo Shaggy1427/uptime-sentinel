@@ -54,6 +54,11 @@ vulnerability report. "The password was set and I got in anyway" very much is.
   credentials without authenticating.
 - Recovering a monitor's stored request headers through the API. These may hold
   bearer tokens for the endpoint being monitored and are meant to be write-only.
+  The single deliberate exception is
+  `GET /api/config/export?includeSecrets=true`, which returns them by design so
+  a backup can be complete — it requires the password like any other endpoint,
+  and getting header values out of *any* other route, or out of that one without
+  the explicit parameter, is a vulnerability.
 - Recovering `NTFY_TOKEN`, `AUTH_PASSWORD`, or the cookie signing key.
 - Forging a session cookie.
 - Remote code execution, command injection, SQL injection, or path traversal.

@@ -36,15 +36,29 @@ export function seedIfEmpty(): number {
     return 0;
   }
 
-  if (!Array.isArray(parsed)) {
-    console.error(`[seed] ${file} must contain a JSON array of monitors`);
+  // A bare array is the original seed format; the object form is what
+  // /api/config/export writes, so an exported file can be dropped in here.
+  const entries = Array.isArray(parsed)
+    ? parsed
+    : Array.isArray((parsed as { monitors?: unknown } | null)?.monitors)
+      ? (parsed as { monitors: unknown[] }).monitors
+      : null;
+
+  if (!entries) {
+    console.error(`[seed] ${file} must contain a JSON array of monitors, or an object with a "monitors" array`);
     return 0;
   }
 
   let created = 0;
-  for (const entry of parsed) {
+  for (const entry of entries) {
     try {
-      const input = validateMonitor(entry, { partial: false }) as MonitorInput;
+      // `parent` and `headersRedacted` are export-only fields the validator
+      // does not know; dependencies are restored through /api/config/import,
+      // which can resolve names to ids. Seeding stays flat.
+      const { parent, headersRedacted, ...fields } = (entry ?? {}) as Record<string, unknown>;
+      void parent;
+      void headersRedacted;
+      const input = validateMonitor(fields, { partial: false }) as MonitorInput;
       createMonitor(input);
       created++;
     } catch (err) {
