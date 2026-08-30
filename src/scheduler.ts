@@ -173,6 +173,11 @@ export class Scheduler {
    * no request, no stored result, no incident, no notification.
    */
   private suppressor(monitor: Monitor, all?: Monitor[]): Monitor | null {
+    // A monitor with no parent has no ancestors, so there is nothing to walk.
+    // Answering without calling ancestorsOf keeps the common case -- standalone
+    // monitors, which are most of them -- free of the O(N) id map that the
+    // walk builds from the monitor list on every single tick.
+    if (monitor.parentId === null) return null;
     for (const ancestor of ancestorsOf(monitor.id, all)) {
       if (ancestor.paused) continue;
       if (this.states.get(ancestor.id)?.status === 'down') return ancestor;
