@@ -14,7 +14,7 @@ import type { ValidateOptions } from './validate.ts';
 import { cookieSecret, passwordMatches } from './secret.ts';
 import { renderMetrics } from './metrics.ts';
 import { exportConfig, importConfig } from './config-io.ts';
-import type { Monitor, Incident, Check } from './types.ts';
+import type { Monitor, Incident } from './types.ts';
 
 const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 
@@ -70,7 +70,7 @@ interface StatusContext {
   monitors: Monitor[];
   byId: Map<number, Monitor>;
   openIncidentByMonitor: Map<number, Incident>;
-  historyByMonitor: Map<number, Check[]>;
+  historyByMonitor: Map<number, store.HistorySample[]>;
   /** Per monitor: [day, week, month] uptime, in that order. */
   uptimeByMonitor: Map<number, store.UptimeStats[]>;
   /** Non-paused descendant count per monitor. Pre-baked so describe is O(1). */
