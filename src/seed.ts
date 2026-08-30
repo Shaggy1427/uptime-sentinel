@@ -48,8 +48,16 @@ export function seedIfEmpty(): number {
     return 0;
   }
 
-  if (!Array.isArray(parsed)) {
-    console.error(`[seed] ${file} must contain a JSON array of monitors`);
+  // A bare array is the original seed format; the object form is what
+  // /api/config/export writes, so an exported file can be dropped in here.
+  const entries = Array.isArray(parsed)
+    ? parsed
+    : Array.isArray((parsed as { monitors?: unknown } | null)?.monitors)
+      ? (parsed as { monitors: unknown[] }).monitors
+      : null;
+
+  if (!entries) {
+    console.error(`[seed] ${file} must contain a JSON array of monitors, or an object with a "monitors" array`);
     return 0;
   }
 
@@ -58,10 +66,13 @@ export function seedIfEmpty(): number {
   const idByName = new Map<string, number | null>(); // null marks an ambiguous (duplicated) name
   const linkLater: { id: number; name: string; parent: unknown; parentId: unknown }[] = [];
 
-  for (const entry of parsed) {
+  for (const entry of entries) {
     try {
       if (typeof entry !== 'object' || entry === null) throw new Error('entry must be an object');
-      const { parent, parentId, ...rest } = entry as Record<string, unknown>;
+      // `headersRedacted` is an export-only marker (see config-io.ts); the
+      // validator does not know it. `parent` / `parentId` are resolved below.
+      const { parent, parentId, headersRedacted, ...rest } = entry as Record<string, unknown>;
+      void headersRedacted;
       const input = validateMonitor(rest, { partial: false, graph: GRAPH }) as MonitorInput;
       const monitor = createMonitor(input);
       created++;

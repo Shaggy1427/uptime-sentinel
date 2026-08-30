@@ -66,6 +66,24 @@ test('/metrics is guarded and accepts the bearer token', async () => {
   assert.match(ok.body, /sentinel_build_info/);
 });
 
+test('the config endpoints are guarded like the rest of the API', async () => {
+  // The export can be asked for real credentials, so it must never be reachable
+  // without the password.
+  for (const url of ['/api/config/export', '/api/config/export?includeSecrets=true']) {
+    assert.equal((await app.inject({ method: 'GET', url })).statusCode, 401, url);
+  }
+  const importAttempt = await app.inject({ method: 'POST', url: '/api/config/import', payload: { monitors: [] } });
+  assert.equal(importAttempt.statusCode, 401);
+
+  const ok = await app.inject({
+    method: 'GET',
+    url: '/api/config/export',
+    headers: { authorization: 'Bearer hunter2' },
+  });
+  assert.equal(ok.statusCode, 200);
+  assert.equal(ok.json().version, 1);
+});
+
 test('repeated failed logins are rate limited', async () => {
   let last;
   for (let i = 0; i < 15; i++) {

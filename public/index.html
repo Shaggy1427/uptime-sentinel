@@ -25,6 +25,8 @@
     </div>
     <div id="summary" class="summary"></div>
     <div class="actions">
+      <button id="btn-export" class="ghost" title="Download every monitor as a JSON file">Export</button>
+      <button id="btn-import" class="ghost" title="Add or update monitors from a JSON file">Import</button>
       <button id="btn-test" class="ghost" title="Send a test notification to ntfy">Test alert</button>
       <button id="btn-add" class="primary">Add monitor</button>
     </div>
@@ -129,6 +131,48 @@
       <menu>
         <button type="button" id="editor-cancel" class="ghost">Cancel</button>
         <button type="submit" class="primary">Save</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="export">
+    <form id="export-form" method="dialog">
+      <h2>Export monitors</h2>
+      <p class="hint">
+        Downloads every monitor as JSON. Import it into another install, or drop it in as a
+        seed file on a fresh one.
+      </p>
+      <label class="check">
+        <input type="checkbox" name="includeSecrets" />
+        Include credentials (request header values)
+      </label>
+      <p class="hint warn">
+        Header values are withheld by default, and the file only records which headers were set.
+        Turn this on and the file contains live tokens &mdash; treat it as a secret.
+      </p>
+      <menu>
+        <button type="button" id="export-cancel" class="ghost">Cancel</button>
+        <button type="submit" class="primary">Download</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="import">
+    <form id="import-form" method="dialog">
+      <h2>Import monitors</h2>
+      <p class="hint">
+        Monitors are matched by name: an existing one is updated, a new one is added, and nothing
+        is ever deleted. You will see exactly what changes before anything is written.
+      </p>
+      <label class="wide">
+        Config file
+        <input type="file" id="import-file" accept="application/json,.json" />
+      </label>
+      <div id="import-report" class="report hidden"></div>
+      <p id="import-error" class="error hidden"></p>
+      <menu>
+        <button type="button" id="import-cancel" class="ghost">Cancel</button>
+        <button type="submit" id="import-apply" class="primary" disabled>Apply</button>
       </menu>
     </form>
   </dialog>

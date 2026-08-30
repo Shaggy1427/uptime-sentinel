@@ -142,6 +142,45 @@ test('PATCH cannot flip a monitor into a type its target does not support', asyn
   await app.inject({ method: 'DELETE', url: `/api/monitors/${id}` });
 });
 
+test('config export and import round-trip over HTTP', async () => {
+  const created = await app.inject({
+    method: 'POST',
+    url: '/api/monitors',
+    payload: { name: 'Exported', type: 'tcp', target: '127.0.0.1:9', intervalS: 3600 },
+  });
+  assert.equal(created.statusCode, 201);
+
+  const exported = await app.inject({ method: 'GET', url: '/api/config/export' });
+  assert.equal(exported.statusCode, 200);
+  // So `curl -OJ` and a direct browser hit land on a sensibly named file.
+  assert.match(exported.headers['content-disposition'] ?? '', /attachment; filename="uptime-sentinel-\d{4}-\d{2}-\d{2}\.json"/);
+  const file = exported.json();
+  assert.equal(file.version, 1);
+  assert.ok(file.monitors.some((m: { name: string }) => m.name === 'Exported'));
+
+  // A dry run reports the work without doing it.
+  const dry = await app.inject({ method: 'POST', url: '/api/config/import?dryRun=true', payload: file });
+  assert.equal(dry.statusCode, 200);
+  assert.equal(dry.json().dryRun, true);
+
+  const applied = await app.inject({ method: 'POST', url: '/api/config/import', payload: file });
+  assert.equal(applied.statusCode, 200);
+  assert.deepEqual(applied.json().errors, []);
+
+  await app.inject({ method: 'DELETE', url: `/api/monitors/${created.json().id}` });
+});
+
+test('an import that cannot be applied is a 400 carrying every reason', async () => {
+  const res = await app.inject({
+    method: 'POST',
+    url: '/api/config/import',
+    payload: { monitors: [{ name: 'Broken', type: 'http', target: 'not-a-url' }] },
+  });
+  assert.equal(res.statusCode, 400);
+  assert.equal(res.json().errors.length, 1);
+  assert.match(res.json().errors[0], /Broken/);
+});
+
 test('deleting a monitor while its check is in flight does not break anything', async () => {
   const created = await app.inject({
     method: 'POST',

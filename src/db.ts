@@ -103,6 +103,31 @@ function migrate(): void {
 
 migrate();
 
+// --------------------------------------------------------------- transaction
+
+/**
+ * Run `fn` in a transaction, rolling back if it throws.
+ *
+ * Returning false from `fn` rolls back too and is not an error -- that is how
+ * a dry-run applies every write, inspects the result, and then leaves the
+ * database exactly as it found it.
+ *
+ * Not reentrant: SQLite has no nested BEGIN, so never call this from inside
+ * another transaction.
+ */
+export function transaction<T>(fn: () => { commit: boolean; value: T }): T {
+  db.exec('BEGIN');
+  let outcome: { commit: boolean; value: T };
+  try {
+    outcome = fn();
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
+  db.exec(outcome.commit ? 'COMMIT' : 'ROLLBACK');
+  return outcome.value;
+}
+
 // ------------------------------------------------------------------- mapping
 
 type Row = Record<string, unknown>;
@@ -511,3 +536,15 @@ export function wouldCreateCycle(monitorId: number, parentId: number): boolean {
   if (monitorId === parentId) return true;
   return ancestorsOf(parentId).some((m) => m.id === monitorId);
 }
+
+/**
+ * Dependency-graph access handed to the validator; see ValidateOptions.graph.
+ *
+ * Deliberately untyped here: validate.ts takes it by shape so that it never has
+ * to import this module, which would close a config -> validate -> db -> config
+ * loop.
+ */
+export const graph = {
+  exists: (id: number) => getMonitor(id) !== null,
+  wouldCreateCycle: (selfId: number, parentId: number) => wouldCreateCycle(selfId, parentId),
+};

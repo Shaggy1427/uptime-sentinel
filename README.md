@@ -357,9 +357,82 @@ Everything the dashboard does is a plain REST call, so you can script it.
 | `POST` | `/api/monitors/:id/check` | Run a check right now |
 | `GET` | `/api/incidents` | Incident history |
 | `POST` | `/api/test-notification` | Send a test push |
+| `GET` | `/api/config/export` | Every monitor as JSON. `?includeSecrets=true` to include credentials |
+| `POST` | `/api/config/import` | Merge a config file in. `?dryRun=true` to preview |
 | `GET` | `/metrics` | Prometheus metrics. Auth required when `AUTH_PASSWORD` is set |
 
 With `AUTH_PASSWORD` set, pass `Authorization: Bearer <password>`.
+
+## Config export and import
+
+**Export** downloads every monitor as a JSON file — a backup, a way to move a
+config to another install, or just a way to read the whole thing as text.
+
+```bash
+curl -OJ http://raspberrypi.local:8080/api/config/export
+```
+
+**Import** merges a file back in. Monitors are matched **by name**: a name that
+already exists is updated, a name that is new is added, and **nothing is ever
+deleted**. Dependencies are stored as the parent's *name*, so they survive the
+trip to an install where the ids are different.
+
+Preview first — `dryRun` runs the entire import and then rolls it back, so what
+it reports is exactly what would happen:
+
+```bash
+curl -X POST 'http://raspberrypi.local:8080/api/config/import?dryRun=true' \
+  -H 'content-type: application/json' --data @uptime-sentinel-2026-08-30.json
+```
+
+```json
+{ "dryRun": true, "created": ["Plex"], "updated": ["Router"], "unchanged": [],
+  "skipped": [], "needCredentials": ["Unraid API"], "errors": [] }
+```
+
+An import is **all or nothing**. If any entry is invalid the whole file is
+rejected with a list of every problem, and nothing is written — unlike seeding,
+which skips a bad entry and carries on because nobody is watching at startup.
+
+Two cases are reported rather than guessed at:
+
+- **`skipped`** — the name matches more than one existing monitor. Monitor names
+  are not unique, and there is no way to tell which one you meant.
+- **`needCredentials`** — see below.
+
+### Credentials are not exported by default
+
+A monitor's request headers can hold a bearer token or an API key, and the API
+treats those as write-only: it will tell you *which* headers are set but never
+what they contain. The export follows that rule. A monitor with credentials
+comes out like this:
+
+```json
+{ "name": "Unraid API", "headers": null, "headersRedacted": ["Authorization"] }
+```
+
+So the ordinary export is a file you can paste into an issue. On import, a
+monitor marked that way **keeps whatever credentials it already has** — a
+restore can never silently wipe a working token — and any monitor left without
+one is listed in `needCredentials` so you know what to re-enter.
+
+For a real backup, ask for them explicitly:
+
+```bash
+curl -OJ 'http://raspberrypi.local:8080/api/config/export?includeSecrets=true'
+```
+
+That file contains live credentials. Treat it like the database.
+
+### Hand-writing a config
+
+The file is a JSON object with a `monitors` array, but a **bare array** is
+accepted too — which is the same shape [`monitors.example.json`](monitors.example.json)
+uses, so an existing seed file imports as-is, and an exported file works as a
+`MONITORS_FILE` seed on a fresh install.
+
+Use `"parent": "Router"` to express a dependency. A `parentId` is refused: an id
+from another install points at whatever happens to hold that number here.
 
 ## Prometheus
 
@@ -465,6 +538,12 @@ automatically when `PUBLIC_URL` is `https://`.
 **Credentials you give a monitor** (an `Authorization` header for an endpoint
 that needs one) are write-only. They are sent upstream on every check but never
 returned by the API — responses show the header names with `<redacted>` values.
+
+**`/api/config/export?includeSecrets=true` is the one exception**, and it has to
+be asked for by name. Without it the export withholds header values, so the
+usual file is safe to copy around; with it, the response carries live
+credentials in plain text and should be handled like a copy of the database.
+Both forms need the password when `AUTH_PASSWORD` is set.
 
 **`/api/health` is deliberately unauthenticated** so an external dead-man's-switch
 can poll it. It returns only counts and a version, never targets.
