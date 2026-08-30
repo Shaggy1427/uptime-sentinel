@@ -154,7 +154,21 @@ export class Scheduler {
       }
 
       if (state.status === 'paused') state.status = 'pending';
-      if (this.running && !this.timers.has(monitor.id)) this.schedule(monitor, this.startupJitter(monitor));
+      if (this.running && !this.timers.has(monitor.id)) {
+        this.schedule(monitor, this.startupJitter(monitor));
+      } else if (this.running && state.nextCheckAt !== null) {
+        // A pending timer carries the interval it was scheduled with. If the
+        // monitor's interval has since been lowered, that timer would keep
+        // firing on the old cadence for up to a full old cycle -- a 24h
+        // monitor changed to 60s would not be checked any sooner for 24h,
+        // and the dashboard's nextCheckAt would sit there agreeing with it.
+        // sync() runs exactly when configuration changes, so pull the next
+        // check back to the new interval. Raising the interval needs no such
+        // correction: the pending check fires soon enough, and the tick
+        // schedules the longer interval from then on.
+        const pendingMs = state.nextCheckAt - Date.now();
+        if (pendingMs > monitor.intervalS * 1000) this.schedule(monitor, monitor.intervalS * 1000);
+      }
     }
   }
 
