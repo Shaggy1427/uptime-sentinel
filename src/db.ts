@@ -107,6 +107,15 @@ const MIGRATIONS: string[] = [
   DROP INDEX idx_checks_monitor_time;
   CREATE INDEX idx_checks_monitor_time ON checks(monitor_id, checked_at DESC, ok, latency_ms);
   `,
+  // 5: a plain index on checked_at for the retention prune. The DELETE in
+  // pruneChecks filters on checked_at alone, but every existing checks index
+  // leads with monitor_id, so SQLite could not use them and pruned by scanning
+  // the whole table -- every six hours, growing forever with retention. The
+  // range scan also serves any future "since when" query that does not pin a
+  // monitor. Cost is one more index to maintain per inserted check.
+  `
+  CREATE INDEX idx_checks_checked_at ON checks(checked_at);
+  `,
 ];
 
 function migrate(): void {
