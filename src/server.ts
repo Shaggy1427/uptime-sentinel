@@ -221,10 +221,26 @@ export async function buildServer() {
     },
     async (req, reply) => {
       if (!authEnabled) return { ok: true };
+      const ip = req.ip;
+
+      // Persistent lockout check: rejects the request before even comparing
+      // the password. The in-process rate limit is the fast-path backstop;
+      // this row is what an attacker cannot reset by waiting for a restart.
+      if (store.isLoginLockedOut(ip)) {
+        return reply.code(429).send({ error: 'Too many requests. Try again later.' });
+      }
+
       const { password } = (req.body ?? {}) as { password?: string };
       if (typeof password !== 'string' || !secretEquals(password, config.authPassword)) {
-        return reply.code(401).send({ error: 'Wrong password' });
+        const row = store.recordLoginFailure(ip);
+        const msg =
+          row.locked_until !== null
+            ? 'Too many requests. Try again later.'
+            : 'Wrong password';
+        return reply.code(401).send({ error: msg });
       }
+      store.clearLoginFailure(ip);
+
       reply.setCookie(AUTH_COOKIE, 'ok', {
         path: '/',
         httpOnly: true,
