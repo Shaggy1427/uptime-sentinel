@@ -1,8 +1,9 @@
 import * as store from './db.ts';
+import { VERSION } from './config.ts';
 import { scheduler } from './scheduler.ts';
+import type { Incident, MonitorStatus } from './types.ts';
 
 const DAY = 86_400_000;
-const VERSION = '0.1.0';
 
 /** Windows the per-monitor rollup gauges are reported over. */
 const WINDOWS: readonly [label: string, spanMs: number][] = [
@@ -12,12 +13,27 @@ const WINDOWS: readonly [label: string, spanMs: number][] = [
 ];
 
 /**
- * Escape a Prometheus label value. Only three characters are special in the
- * text exposition format: backslash, double-quote, and newline. Monitor names
- * are user input, so this is not optional.
+ * Every state a monitor can be in. All five are emitted for every monitor, one
+ * set to 1 and the rest to 0, rather than emitting only the current one --
+ * otherwise `sentinel_monitor_status{status="down"}` returns *nothing* while a
+ * monitor is healthy instead of 0, which leaves holes in graphs and makes
+ * `sum by (status)` disagree with the monitor count.
+ */
+const STATUSES: readonly MonitorStatus[] = ['up', 'down', 'pending', 'suppressed', 'paused'];
+
+/**
+ * Escape a Prometheus label value. The exposition format gives meaning to the
+ * backslash, the double-quote and the line feed; a carriage return is escaped
+ * too because it would otherwise be emitted raw and split a line for some
+ * parsers. Monitor names are user input with no character restrictions, so
+ * none of this is optional.
  */
 function esc(value: string): string {
-  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n');
+  return value
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r');
 }
 
 /** Render `{k="v",k2="v2"}` with values escaped. Insertion order is preserved. */
@@ -39,42 +55,28 @@ interface Family {
 /**
  * The whole `/metrics` body. `now` is injectable so the rollup windows are
  * deterministic under test.
+ *
+ * Cost is three queries regardless of how many monitors exist: the monitor
+ * list, every open incident, and one grouped rollup across all windows. This
+ * runs on whatever interval Prometheus scrapes at, so per-monitor queries here
+ * would be a permanent load on a Pi rather than a one-off.
  */
 export function renderMetrics(now = Date.now()): string {
   const monitors = store.listMonitors();
-  const statusOf = (m: (typeof monitors)[number]) =>
-    m.paused ? 'paused' : (scheduler.getState(m.id)?.status ?? 'pending');
+
+  const openIncidents = store.listOpenIncidents();
+  // Newest first from the query, so the first one seen per monitor is the one
+  // openIncidentFor would have returned.
+  const incidentByMonitor = new Map<number, Incident>();
+  for (const incident of openIncidents) {
+    if (!incidentByMonitor.has(incident.monitorId)) incidentByMonitor.set(incident.monitorId, incident);
+  }
+
+  const rollups = store.uptimeSinceAll(WINDOWS.map(([, span]) => now - span));
 
   const families: Family[] = [];
   const add = (name: string, help: string, type: Family['type'], samples: string[]) =>
     families.push({ name, help, type, samples });
-
-  // ---------------------------------------------------------------- global
-
-  add('sentinel_build_info', 'Build metadata; value is always 1.', 'gauge', [
-    `sentinel_build_info${labels({ version: VERSION })} 1`,
-  ]);
-
-  const countWithStatus = (s: string) => monitors.filter((m) => statusOf(m) === s).length;
-
-  add('sentinel_monitors_total', 'Number of configured monitors.', 'gauge', [
-    `sentinel_monitors_total ${monitors.length}`,
-  ]);
-  add('sentinel_monitors_down', 'Monitors whose last check failed for long enough to count as down.', 'gauge', [
-    `sentinel_monitors_down ${countWithStatus('down')}`,
-  ]);
-  add(
-    'sentinel_monitors_suppressed',
-    'Monitors not being checked because an ancestor dependency is down.',
-    'gauge',
-    [`sentinel_monitors_suppressed ${countWithStatus('suppressed')}`],
-  );
-  add('sentinel_monitors_paused', 'Monitors that are paused.', 'gauge', [
-    `sentinel_monitors_paused ${countWithStatus('paused')}`,
-  ]);
-  add('sentinel_incidents_open', 'Incidents that have not been resolved.', 'gauge', [
-    `sentinel_incidents_open ${store.openIncidentCount()}`,
-  ]);
 
   // ------------------------------------------------------------ per monitor
 
@@ -88,28 +90,37 @@ export function renderMetrics(now = Date.now()): string {
   const avgLatency: string[] = [];
   const info: string[] = [];
 
+  const counts: Record<string, number> = { up: 0, down: 0, pending: 0, suppressed: 0, paused: 0 };
+  /** Newest check across every monitor -- the "is the scheduler still working" signal. */
+  let newestCheckAt: number | null = null;
+
   for (const m of monitors) {
     const state = scheduler.getState(m.id);
-    const current = statusOf(m);
+    const current: MonitorStatus = m.paused ? 'paused' : (state?.status ?? 'pending');
+    counts[current] = (counts[current] ?? 0) + 1;
+
     const base = { id: m.id, monitor: m.name };
 
     up.push(`sentinel_monitor_up${labels(base)} ${current === 'up' ? 1 : 0}`);
-    status.push(`sentinel_monitor_status${labels({ ...base, status: current })} 1`);
+    for (const s of STATUSES) {
+      status.push(`sentinel_monitor_status${labels({ ...base, status: s })} ${s === current ? 1 : 0}`);
+    }
     consecutiveFailures.push(
       `sentinel_monitor_consecutive_failures${labels(base)} ${state?.consecutiveFailures ?? 0}`,
     );
 
     const lat = state?.lastResult?.latencyMs;
-    if (lat != null) latency.push(`sentinel_monitor_last_check_latency_ms${labels(base)} ${lat}`);
+    if (lat != null) latency.push(`sentinel_monitor_last_check_latency_seconds${labels(base)} ${lat / 1000}`);
 
     if (state?.lastCheckedAt != null) {
       lastCheck.push(
         `sentinel_monitor_last_check_timestamp_seconds${labels(base)} ${state.lastCheckedAt / 1000}`,
       );
+      if (newestCheckAt === null || state.lastCheckedAt > newestCheckAt) newestCheckAt = state.lastCheckedAt;
     }
 
     if (!m.paused) {
-      const incident = store.openIncidentFor(m.id);
+      const incident = incidentByMonitor.get(m.id);
       if (incident) {
         downSince.push(
           `sentinel_monitor_down_since_seconds${labels(base)} ${Math.round((now - incident.startedAt) / 1000)}`,
@@ -117,23 +128,68 @@ export function renderMetrics(now = Date.now()): string {
       }
     }
 
-    for (const [window, span] of WINDOWS) {
-      const stats = store.uptimeSince(m.id, now - span);
-      if (stats.ratio != null) {
-        upRatio.push(`sentinel_monitor_up_ratio${labels({ ...base, window })} ${stats.ratio}`);
-      }
-      if (stats.avgLatencyMs != null) {
-        avgLatency.push(`sentinel_monitor_avg_latency_ms${labels({ ...base, window })} ${stats.avgLatencyMs}`);
-      }
+    const stats = rollups.get(m.id);
+    if (stats) {
+      WINDOWS.forEach(([window], i) => {
+        const s = stats[i];
+        if (!s) return;
+        if (s.ratio != null) {
+          upRatio.push(`sentinel_monitor_up_ratio${labels({ ...base, window })} ${s.ratio}`);
+        }
+        if (s.avgLatencyMs != null) {
+          avgLatency.push(
+            `sentinel_monitor_avg_latency_seconds${labels({ ...base, window })} ${s.avgLatencyMs / 1000}`,
+          );
+        }
+      });
     }
 
     info.push(`sentinel_monitor_info${labels({ ...base, type: m.type, parent: m.parentId ?? '' })} 1`);
   }
 
-  add('sentinel_monitor_up', "1 when the monitor's last check passed, 0 for any other state.", 'gauge', up);
+  // ---------------------------------------------------------------- global
+
+  add('sentinel_build_info', 'Build metadata; value is always 1.', 'gauge', [
+    `sentinel_build_info${labels({ version: VERSION })} 1`,
+  ]);
+  add('sentinel_uptime_seconds', 'Seconds since this process started.', 'gauge', [
+    `sentinel_uptime_seconds ${Math.round(process.uptime())}`,
+  ]);
+  add(
+    'sentinel_last_check_timestamp_seconds',
+    'Unix time of the most recent check across all monitors. Goes stale if the scheduler stops working, which a live process can do silently. Absent until the first check has run.',
+    'gauge',
+    newestCheckAt === null ? [] : [`sentinel_last_check_timestamp_seconds ${newestCheckAt / 1000}`],
+  );
+
+  add('sentinel_monitors_total', 'Number of configured monitors.', 'gauge', [
+    `sentinel_monitors_total ${monitors.length}`,
+  ]);
+  add('sentinel_monitors_down', 'Monitors whose last check failed for long enough to count as down.', 'gauge', [
+    `sentinel_monitors_down ${counts.down}`,
+  ]);
+  add(
+    'sentinel_monitors_suppressed',
+    'Monitors not being checked because an ancestor dependency is down.',
+    'gauge',
+    [`sentinel_monitors_suppressed ${counts.suppressed}`],
+  );
+  add('sentinel_monitors_paused', 'Monitors that are paused.', 'gauge', [
+    `sentinel_monitors_paused ${counts.paused}`,
+  ]);
+  add('sentinel_incidents_open', 'Incidents that have not been resolved.', 'gauge', [
+    `sentinel_incidents_open ${openIncidents.length}`,
+  ]);
+
+  add(
+    'sentinel_monitor_up',
+    '1 when the last check passed, 0 for every other state INCLUDING paused, pending and suppressed. Alert on sentinel_monitor_status{status="down"} instead unless you mean to page on those too.',
+    'gauge',
+    up,
+  );
   add(
     'sentinel_monitor_status',
-    'The series whose `status` label names the current state has value 1 (up, down, pending, suppressed, paused).',
+    'One series per state (up, down, pending, suppressed, paused); the current state is 1 and the rest are 0.',
     'gauge',
     status,
   );
@@ -144,7 +200,7 @@ export function renderMetrics(now = Date.now()): string {
     consecutiveFailures,
   );
   add(
-    'sentinel_monitor_last_check_latency_ms',
+    'sentinel_monitor_last_check_latency_seconds',
     'Latency of the most recent check. Absent when the last check recorded no latency (timeout, connection refused).',
     'gauge',
     latency,
@@ -168,7 +224,7 @@ export function renderMetrics(now = Date.now()): string {
     upRatio,
   );
   add(
-    'sentinel_monitor_avg_latency_ms',
+    'sentinel_monitor_avg_latency_seconds',
     'Mean latency of passing checks within the labelled window. Absent when there are no passing checks in the window.',
     'gauge',
     avgLatency,

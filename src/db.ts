@@ -295,6 +295,62 @@ export function uptimeSince(monitorId: number, sinceMs: number): UptimeStats {
   };
 }
 
+/**
+ * uptimeSince for every monitor over several windows at once.
+ *
+ * The metrics endpoint needs three windows for each of N monitors. Done the
+ * obvious way that is 3N queries on a fixed scrape interval, forever; this
+ * folds them into one grouped scan using conditional aggregation. Returns one
+ * UptimeStats per cutoff, in the order the cutoffs were given.
+ *
+ * Monitors with no checks inside the widest window are absent from the map
+ * rather than present with zeroes -- "no data" and "nothing passed" are
+ * different answers, and only the caller knows which one to render.
+ */
+export function uptimeSinceAll(cutoffs: number[]): Map<number, UptimeStats[]> {
+  const out = new Map<number, UptimeStats[]>();
+  if (cutoffs.length === 0) return out;
+
+  // Placeholders bind in SQL text order: every column's cutoff first, then the
+  // widest one for the WHERE that bounds the scan.
+  const columns: string[] = [];
+  const params: number[] = [];
+  cutoffs.forEach((cutoff, i) => {
+    columns.push(
+      `COUNT(*) FILTER (WHERE checked_at >= ?) AS t${i}`,
+      `COALESCE(SUM(ok) FILTER (WHERE checked_at >= ?), 0) AS u${i}`,
+      `AVG(CASE WHEN ok = 1 THEN latency_ms END) FILTER (WHERE checked_at >= ?) AS l${i}`,
+    );
+    params.push(cutoff, cutoff, cutoff);
+  });
+  params.push(Math.min(...cutoffs));
+
+  const rows = db
+    .prepare(
+      `SELECT monitor_id, ${columns.join(', ')}
+       FROM checks WHERE checked_at >= ? GROUP BY monitor_id`,
+    )
+    .all(...params) as Row[];
+
+  for (const row of rows) {
+    out.set(
+      Number(row.monitor_id),
+      cutoffs.map((_, i) => {
+        const total = Number(row[`t${i}`]);
+        const up = Number(row[`u${i}`]);
+        const avg = row[`l${i}`];
+        return {
+          total,
+          up,
+          ratio: total > 0 ? up / total : null,
+          avgLatencyMs: avg === null || avg === undefined ? null : Math.round(Number(avg)),
+        };
+      }),
+    );
+  }
+  return out;
+}
+
 export function pruneChecks(beforeMs: number): number {
   return Number(db.prepare('DELETE FROM checks WHERE checked_at < ?').run(beforeMs).changes);
 }
@@ -344,9 +400,16 @@ export function resolveIncident(id: number, at: number): void {
   db.prepare('UPDATE incidents SET resolved_at = ? WHERE id = ?').run(at, id);
 }
 
-export function openIncidentCount(): number {
-  const r = db.prepare('SELECT COUNT(*) AS n FROM incidents WHERE resolved_at IS NULL').get() as Row;
-  return Number(r.n);
+/**
+ * Every unresolved incident, newest first, in one query.
+ *
+ * For callers that need the open incident of *every* monitor (the metrics
+ * endpoint), this replaces N calls to openIncidentFor with a single scan.
+ */
+export function listOpenIncidents(): Incident[] {
+  return (
+    db.prepare('SELECT * FROM incidents WHERE resolved_at IS NULL ORDER BY started_at DESC').all() as Row[]
+  ).map(toIncident);
 }
 
 export function listIncidents(limit = 50, monitorId?: number): Incident[] {

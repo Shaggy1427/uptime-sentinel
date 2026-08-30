@@ -5,7 +5,7 @@ import type { FastifyError } from 'fastify';
 import fastifyStatic from '@fastify/static';
 import fastifyCookie from '@fastify/cookie';
 import fastifyRateLimit from '@fastify/rate-limit';
-import { config } from './config.ts';
+import { config, VERSION } from './config.ts';
 import * as store from './db.ts';
 import { scheduler } from './scheduler.ts';
 import { dispatch } from './notify/index.ts';
@@ -206,7 +206,7 @@ export async function buildServer() {
     const suppressed = monitors.filter((m) => !m.paused && scheduler.getState(m.id)?.status === 'suppressed');
     return {
       ok: true,
-      version: '0.1.0',
+      version: VERSION,
       monitors: monitors.length,
       down: down.length,
       suppressed: suppressed.length,

@@ -34,10 +34,22 @@ test('/metrics serves the Prometheus exposition format', async () => {
   assert.match(res.body, /# TYPE sentinel_monitors_total gauge/);
   assert.match(res.body, /^sentinel_monitors_total \d+$/m);
   assert.match(res.body, /^sentinel_build_info\{version="0\.1\.0"\} 1$/m);
+  assert.match(res.body, /^sentinel_uptime_seconds \d+$/m);
   assert.ok(res.body.endsWith('\n'));
+
+  // Every family that emits a sample declares HELP and TYPE exactly once.
+  for (const line of res.body.split('\n')) {
+    if (line === '' || line.startsWith('#')) continue;
+    const name = line.slice(0, line.search(/[{ ]/));
+    assert.equal(
+      res.body.split('\n').filter((l) => l.startsWith(`# TYPE ${name} `)).length,
+      1,
+      `${name} should declare TYPE once`,
+    );
+  }
 });
 
-test('a monitor gets labelled series and the name is escaped', async () => {
+test('a monitor gets labelled series, and the name is escaped', async () => {
   const created = await app.inject({
     method: 'POST',
     url: '/api/monitors',
@@ -53,20 +65,76 @@ test('a monitor gets labelled series and the name is escaped', async () => {
   assert.match(res.body, new RegExp(`^sentinel_monitor_up\\{id="${id}",monitor="Tower \\\\"NAS\\\\""\\} [01]$`, 'm'));
   assert.match(
     res.body,
-    new RegExp(
-      `^sentinel_monitor_status\\{id="${id}",monitor="Tower \\\\"NAS\\\\"",status="(pending|up|down)"\\} 1$`,
-      'm',
-    ),
-  );
-  assert.match(
-    res.body,
     new RegExp(`^sentinel_monitor_info\\{id="${id}",monitor="Tower \\\\"NAS\\\\"",type="tcp",parent=""\\} 1$`, 'm'),
   );
 
   await app.inject({ method: 'DELETE', url: `/api/monitors/${id}` });
 });
 
-test('rollup gauges appear once a monitor has recorded checks, and reflect the data', () => {
+test('a newline or carriage return in a name cannot break the line format', () => {
+  const monitor = store.createMonitor({
+    name: 'Bad\nName\rHere',
+    type: 'tcp',
+    target: '127.0.0.1:9',
+    intervalS: 3600,
+  });
+
+  const body = renderMetrics();
+  // The raw control characters must not survive into the output at all: one
+  // stray newline inside a label would split a sample into two broken lines.
+  const sample = body.split('\n').find((l) => l.startsWith('sentinel_monitor_up{'));
+  assert.ok(sample, 'expected an up sample');
+  assert.match(sample, /monitor="Bad\\nName\\rHere"/);
+
+  store.deleteMonitor(monitor.id);
+});
+
+test('every status is emitted, with exactly one set to 1', () => {
+  const monitor = store.createMonitor({ name: 'Enum', type: 'tcp', target: '127.0.0.1:9', intervalS: 3600 });
+
+  const body = renderMetrics();
+  const samples = body
+    .split('\n')
+    .filter((l) => l.startsWith(`sentinel_monitor_status{id="${monitor.id}",`));
+
+  // All five states present, so a PromQL query for a state a monitor is not in
+  // returns 0 rather than an empty result.
+  assert.equal(samples.length, 5);
+  for (const s of ['up', 'down', 'pending', 'suppressed', 'paused']) {
+    assert.ok(
+      samples.some((l) => l.includes(`status="${s}"`)),
+      `expected a series for status="${s}"`,
+    );
+  }
+  assert.equal(samples.filter((l) => l.endsWith(' 1')).length, 1, 'exactly one state should be 1');
+
+  store.deleteMonitor(monitor.id);
+});
+
+test('a paused monitor reads as paused, not as down', () => {
+  const monitor = store.createMonitor({
+    name: 'Resting',
+    type: 'tcp',
+    target: '127.0.0.1:9',
+    intervalS: 3600,
+    paused: true,
+  });
+
+  const body = renderMetrics();
+  assert.match(
+    body,
+    new RegExp(`^sentinel_monitor_status\\{id="${monitor.id}",monitor="Resting",status="paused"\\} 1$`, 'm'),
+  );
+  assert.match(
+    body,
+    new RegExp(`^sentinel_monitor_status\\{id="${monitor.id}",monitor="Resting",status="down"\\} 0$`, 'm'),
+  );
+  assert.match(body, /^sentinel_monitors_paused 1$/m);
+
+  store.deleteMonitor(monitor.id);
+});
+
+test('rollup gauges report seconds and reflect the recorded checks', () => {
   const monitor = store.createMonitor({ name: 'Rollup', type: 'tcp', target: '127.0.0.1:9', intervalS: 3600 });
   const now = Date.now();
   store.insertCheck(monitor.id, { ok: true, statusCode: null, latencyMs: 10, error: null }, now - 1000);
@@ -80,13 +148,56 @@ test('rollup gauges appear once a monitor has recorded checks, and reflect the d
     body,
     new RegExp(`^sentinel_monitor_up_ratio\\{id="${monitor.id}",monitor="Rollup",window="1d"\\} 0\\.6+`, 'm'),
   );
-  // Mean latency over the passing checks is (10 + 30) / 2 = 20.
+  // Mean latency over the passing checks is (10 + 30) / 2 = 20ms, reported in
+  // seconds because Prometheus convention is base units.
   assert.match(
     body,
-    new RegExp(`^sentinel_monitor_avg_latency_ms\\{id="${monitor.id}",monitor="Rollup",window="7d"\\} 20$`, 'm'),
+    new RegExp(`^sentinel_monitor_avg_latency_seconds\\{id="${monitor.id}",monitor="Rollup",window="7d"\\} 0\\.02$`, 'm'),
   );
+  assert.doesNotMatch(body, /_latency_ms/);
 
   store.deleteMonitor(monitor.id);
+});
+
+test('a window with no checks is omitted rather than reported as zero', () => {
+  const monitor = store.createMonitor({ name: 'Stale', type: 'tcp', target: '127.0.0.1:9', intervalS: 3600 });
+  const now = Date.now();
+  // Only a check from 10 days ago: inside 30d, outside 1d and 7d.
+  store.insertCheck(monitor.id, { ok: true, statusCode: null, latencyMs: 5, error: null }, now - 10 * 86_400_000);
+
+  const body = renderMetrics(now);
+  const ratios = body.split('\n').filter((l) => l.startsWith(`sentinel_monitor_up_ratio{id="${monitor.id}",`));
+  assert.equal(ratios.length, 1);
+  assert.match(ratios[0]!, /window="30d"\} 1$/);
+
+  store.deleteMonitor(monitor.id);
+});
+
+test('the batched rollup agrees with querying each monitor one at a time', () => {
+  const now = Date.now();
+  const a = store.createMonitor({ name: 'A', type: 'tcp', target: '127.0.0.1:9', intervalS: 3600 });
+  const b = store.createMonitor({ name: 'B', type: 'tcp', target: '127.0.0.1:9', intervalS: 3600 });
+  // C has no checks at all, so it must be absent from the batch result.
+  const c = store.createMonitor({ name: 'C', type: 'tcp', target: '127.0.0.1:9', intervalS: 3600 });
+
+  store.insertCheck(a.id, { ok: true, statusCode: null, latencyMs: 12, error: null }, now - 1000);
+  store.insertCheck(a.id, { ok: false, statusCode: null, latencyMs: null, error: 'x' }, now - 2000);
+  store.insertCheck(a.id, { ok: true, statusCode: null, latencyMs: 40, error: null }, now - 3 * 86_400_000);
+  store.insertCheck(b.id, { ok: true, statusCode: null, latencyMs: 7, error: null }, now - 5000);
+
+  const cutoffs = [now - 86_400_000, now - 7 * 86_400_000, now - 30 * 86_400_000];
+  const batched = store.uptimeSinceAll(cutoffs);
+
+  for (const m of [a, b]) {
+    const rows = batched.get(m.id);
+    assert.ok(rows, `expected batched stats for ${m.name}`);
+    cutoffs.forEach((cutoff, i) => {
+      assert.deepEqual(rows[i], store.uptimeSince(m.id, cutoff), `${m.name} window ${i} should match`);
+    });
+  }
+  assert.equal(batched.get(c.id), undefined, 'a monitor with no checks should be absent, not zeroed');
+
+  for (const m of [a, b, c]) store.deleteMonitor(m.id);
 });
 
 test('open incidents are counted and exposed as down_since', () => {
@@ -99,6 +210,22 @@ test('open incidents are counted and exposed as down_since', () => {
   assert.match(
     body,
     new RegExp(`^sentinel_monitor_down_since_seconds\\{id="${monitor.id}",monitor="Sad"\\} 90$`, 'm'),
+  );
+
+  store.deleteMonitor(monitor.id);
+});
+
+test('down_since reports the newest open incident when a monitor has several', () => {
+  const monitor = store.createMonitor({ name: 'Repeat', type: 'tcp', target: '127.0.0.1:9', intervalS: 3600 });
+  const now = Date.now();
+  store.createIncident(monitor.id, now - 500_000, 'old', 1);
+  store.createIncident(monitor.id, now - 60_000, 'new', 1);
+
+  // Matches openIncidentFor, which takes the most recent unresolved incident.
+  const body = renderMetrics(now);
+  assert.match(
+    body,
+    new RegExp(`^sentinel_monitor_down_since_seconds\\{id="${monitor.id}",monitor="Repeat"\\} 60$`, 'm'),
   );
 
   store.deleteMonitor(monitor.id);
