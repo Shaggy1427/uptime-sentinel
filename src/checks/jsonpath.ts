@@ -16,7 +16,21 @@ export class PathError extends Error {}
 
 type Segment = { kind: 'key'; key: string } | { kind: 'index'; index: number } | { kind: 'all' };
 
+/**
+ * Parsed paths, memoised by path string.
+ *
+ * readPath re-tokenises the same path on every check, forever; validation
+ * re-parses it on every write too. The parse is a pure function of the
+ * string, so each distinct path is tokenised once. The cache is capped
+ * because paths are user input via the API.
+ */
+const PARSED_PATHS = new Map<string, Segment[]>();
+const PARSED_PATH_CAP = 256;
+
 export function parsePath(path: string): Segment[] {
+  const cached = PARSED_PATHS.get(path);
+  if (cached) return cached;
+
   const trimmed = path.trim().replace(/^\$\.?/, '');
   if (!trimmed) throw new PathError('Path is empty');
 
@@ -41,6 +55,9 @@ export function parsePath(path: string): Segment[] {
   }
 
   if (segments.length === 0) throw new PathError(`Could not read the path "${path}"`);
+
+  if (PARSED_PATHS.size >= PARSED_PATH_CAP) PARSED_PATHS.clear();
+  PARSED_PATHS.set(path, segments);
   return segments;
 }
 
