@@ -73,6 +73,15 @@ const MIGRATIONS: string[] = [
   ALTER TABLE monitors ADD COLUMN parent_id INTEGER REFERENCES monitors(id) ON DELETE SET NULL;
   CREATE INDEX idx_monitors_parent ON monitors(parent_id);
   `,
+  // 4: widen the checks index to cover ok / latency_ms. The uptime aggregates
+  // on /api/status and /metrics filter by (monitor_id, checked_at) but read
+  // ok and latency_ms, so the old index located the range and then hit the
+  // table for every row in it -- a full retention window per monitor. With
+  // both payload columns in the index the aggregate is index-only.
+  `
+  DROP INDEX idx_checks_monitor_time;
+  CREATE INDEX idx_checks_monitor_time ON checks(monitor_id, checked_at DESC, ok, latency_ms);
+  `,
 ];
 
 function migrate(): void {
@@ -260,6 +269,34 @@ export function recentChecks(monitorId: number, limit = 60): Check[] {
   )
     .map(toCheck)
     .reverse();
+}
+
+/**
+ * The most recent `perMonitor` checks for every monitor at once, oldest-first
+ * within each list (matching `recentChecks`).
+ *
+ * For the dashboard poll, which describes every monitor, this is one windowed
+ * scan instead of a `recentChecks` query per monitor.
+ */
+export function recentChecksAll(perMonitor: number): Map<number, Check[]> {
+  const rows = db
+    .prepare(
+      `SELECT * FROM (
+         SELECT *, ROW_NUMBER() OVER (PARTITION BY monitor_id ORDER BY checked_at DESC) AS rn
+         FROM checks
+       ) WHERE rn <= ?
+       ORDER BY monitor_id, checked_at ASC`,
+    )
+    .all(perMonitor) as Row[];
+
+  const out = new Map<number, Check[]>();
+  for (const row of rows) {
+    const check = toCheck(row);
+    const list = out.get(check.monitorId);
+    if (list) list.push(check);
+    else out.set(check.monitorId, [check]);
+  }
+  return out;
 }
 
 export function lastCheck(monitorId: number): Check | null {
