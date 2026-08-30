@@ -363,8 +363,38 @@ function renderSummary(monitors, notificationsConfigured) {
   document.title = count('down') > 0 ? `(${count('down')} down) Uptime Sentinel` : 'Uptime Sentinel';
 }
 
+/**
+ * A fingerprint of everything the table renders. Incident rows are immutable
+ * once created except for the fields an open incident bumps (resolution,
+ * alert/reminder stamps, failure count, cause), so an unchanged key means the
+ * table would come out byte-for-byte identical.
+ */
+function incidentsKey(incidents) {
+  return incidents
+    .map((i) => `${i.id}|${i.resolvedAt ?? ''}|${i.alertedAt ?? ''}|${i.lastReminderAt ?? ''}|${i.checksFailed ?? 0}|${i.cause ?? ''}`)
+    .join(';');
+}
+
+let lastIncidentsKey = null;
+
 function renderIncidents(incidents) {
   const host = $('#incidents');
+  const key = incidentsKey(incidents);
+
+  if (key === lastIncidentsKey) {
+    // Nothing about the data changed since the last paint, so rebuilding
+    // would only churn the DOM every 10s poll. An ongoing incident's
+    // duration column is the one thing that ticks on its own; touch just
+    // those cells and leave the rest of the table (and any text the user is
+    // selecting) alone.
+    for (const row of host.querySelectorAll('tr[data-ongoing]')) {
+      const cell = row.querySelector('td:nth-child(3)');
+      if (cell) setText(cell, duration(Date.now() - Number(row.dataset.startedAt)));
+    }
+    return;
+  }
+  lastIncidentsKey = key;
+
   host.replaceChildren();
   if (incidents.length === 0) {
     host.append(el('p', 'empty-state', 'No incidents recorded. Quiet is good.'));
@@ -380,6 +410,10 @@ function renderIncidents(incidents) {
   for (const i of incidents) {
     const row = el('tr');
     const end = i.resolvedAt ?? Date.now();
+    if (i.resolvedAt == null) {
+      row.dataset.ongoing = 'true';
+      row.dataset.startedAt = String(i.startedAt);
+    }
     row.append(
       el('td', null, i.monitorName),
       el('td', null, new Date(i.startedAt).toLocaleString()),
