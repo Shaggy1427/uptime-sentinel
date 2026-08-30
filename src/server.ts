@@ -405,7 +405,7 @@ export async function buildServer() {
       monitorId = parsed;
     }
     const incidents = store.listIncidents(limit, monitorId);
-    const names = new Map(store.listMonitors().map((m) => [m.id, m.name]));
+    const names = store.monitorNameMap();
     return incidents.map((i) => ({ ...i, monitorName: names.get(i.monitorId) ?? 'deleted monitor' }));
   });
 

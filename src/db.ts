@@ -197,6 +197,19 @@ export function getMonitor(id: number): Monitor | null {
   return r ? toMonitor(r) : null;
 }
 
+/**
+ * id -> name for every monitor, from a two-column query.
+ *
+ * Callers that only need names (the incidents endpoint annotating rows with
+ * monitorName) used to pay listMonitors() for it: every row mapped field by
+ * field, including a JSON.parse of stored headers per monitor, just to throw
+ * all but id and name away.
+ */
+export function monitorNameMap(): Map<number, string> {
+  const rows = db.prepare('SELECT id, name FROM monitors').all() as { id: number; name: string }[];
+  return new Map(rows.map((r) => [Number(r.id), String(r.name)]));
+}
+
 export function createMonitor(input: MonitorInput): Monitor {
   const now = Date.now();
   const d = config.defaults;
