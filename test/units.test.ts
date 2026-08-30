@@ -85,6 +85,49 @@ test('validateMonitor in partial mode allows a single field', () => {
   assert.deepEqual(validateMonitor({ paused: true }, { partial: true }), { paused: true });
 });
 
+test('validateMonitor defaults jsonOperator without clobbering a stored one', () => {
+  // Create with no operator -> defaults to "exists".
+  assert.equal(
+    validateMonitor({ name: 'j', type: 'json', target: 'http://tower/api', jsonPath: 'state' }, { partial: false }).jsonOperator,
+    'exists',
+  );
+
+  // Explicitly clearing it falls back to the default, never persists null.
+  assert.equal(
+    validateMonitor({ jsonOperator: null }, {
+      partial: true,
+      current: {
+        type: 'json',
+        target: 'http://tower/api',
+        method: 'GET',
+        keyword: null,
+        jsonPath: 'state',
+        jsonOperator: 'eq',
+        jsonExpected: 'UP',
+      },
+    }).jsonOperator,
+    'exists',
+  );
+
+  // A patch that does not mention jsonOperator must leave the stored one alone.
+  assert.equal(
+    'jsonOperator' in
+      validateMonitor({ name: 'renamed' }, {
+        partial: true,
+        current: {
+        type: 'json',
+        target: 'http://tower/api',
+        method: 'GET',
+        keyword: null,
+        jsonPath: 'state',
+        jsonOperator: 'eq',
+        jsonExpected: 'UP',
+      },
+      }),
+    false,
+  );
+});
+
 test('numeric fields reject trailing garbage and non-integers', () => {
   const bad = [
     { intervalS: '60abc' },
