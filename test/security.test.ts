@@ -8,6 +8,9 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sentinel-sec-'));
 process.env.DATA_DIR = tmp;
 process.env.NTFY_TOPIC = '';
 process.env.AUTH_PASSWORD = 'correct-horse-battery-staple';
+// Tests use LAN-style targets to exercise the rest of the API; SSRF guard
+// is verified in its own test file with the guard enabled.
+process.env.BLOCK_PRIVATE_TARGETS = 'false';
 
 const { buildServer } = await import('../src/server.ts');
 

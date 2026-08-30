@@ -9,6 +9,9 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sentinel-sched-'));
 process.env.DATA_DIR = tmp;
 process.env.NTFY_TOPIC = '';
 process.env.AUTH_PASSWORD = '';
+// Tests use LAN-style targets to exercise the rest of the API; SSRF guard
+// is verified in its own test file with the guard enabled.
+process.env.BLOCK_PRIVATE_TARGETS = 'false';
 
 // The scheduler is driven here purely through runNow(), so start() is never
 // called: no timers, no rehydrate, no prune -- each test steps the state machine

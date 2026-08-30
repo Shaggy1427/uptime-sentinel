@@ -2,6 +2,7 @@ import { SAFE_HOST } from './checks/ping.ts';
 import { parseHostPort } from './checks/tcp.ts';
 import { OPERATORS, isOperator } from './checks/assert.ts';
 import { parsePath, PathError } from './checks/jsonpath.ts';
+import { isPrivateLiteral, looksLikeLiteralIp } from './ssrf.ts';
 import type { Monitor, MonitorInput, MonitorType } from './types.ts';
 
 const TYPES: MonitorType[] = ['http', 'tcp', 'ping', 'json'];
@@ -94,7 +95,7 @@ export function validateMonitor(input: unknown, { partial, current, graph }: Val
   const effType = (out.type ?? current?.type) as string | undefined;
   const effTarget = (out.target ?? current?.target) as string | undefined;
   if (effType && effTarget) {
-    if (effType === 'http') {
+    if (effType === 'http' || effType === 'json') {
       let url: URL | null = null;
       try {
         url = new URL(effTarget);
@@ -102,14 +103,32 @@ export function validateMonitor(input: unknown, { partial, current, graph }: Val
         url = null;
       }
       if (!url || !/^https?:$/.test(url.protocol)) {
-        throw new ValidationError('http monitors need a target starting with http:// or https://');
+        throw new ValidationError(`${effType} monitors need a target starting with http:// or https://`);
+      }
+      // SSRF guard: reject literal loopback / RFC1918 / link-local / cloud-
+      // metadata IPs unless the operator has explicitly opted out via
+      // BLOCK_PRIVATE_TARGETS=false. Hostnames that resolve to a private IP
+      // are caught at fetch time. Read the env directly here rather than via
+      // the `config` module to keep this file free of the config -> validate
+      // cycle that LIMITS already has to dodge.
+      if (process.env.BLOCK_PRIVATE_TARGETS !== 'false' && isPrivateLiteral(url.hostname.replace(/^\[|\]$/g, ''))) {
+        throw new ValidationError('target is in a private IP range; set BLOCK_PRIVATE_TARGETS=false to allow');
       }
     }
     if (effType === 'tcp' && !parseHostPort(effTarget)) {
       throw new ValidationError('tcp monitors need a target in host:port form (port 1-65535)');
     }
+    if (effType === 'tcp' && process.env.BLOCK_PRIVATE_TARGETS !== 'false') {
+      const parsed = parseHostPort(effTarget);
+      if (parsed && looksLikeLiteralIp(parsed.host) && isPrivateLiteral(parsed.host)) {
+        throw new ValidationError('target is in a private IP range; set BLOCK_PRIVATE_TARGETS=false to allow');
+      }
+    }
     if (effType === 'ping' && !SAFE_HOST.test(effTarget)) {
       throw new ValidationError('ping monitors need a plain hostname or IP (no scheme, no port)');
+    }
+    if (effType === 'ping' && process.env.BLOCK_PRIVATE_TARGETS !== 'false' && looksLikeLiteralIp(effTarget) && isPrivateLiteral(effTarget)) {
+      throw new ValidationError('target is in a private IP range; set BLOCK_PRIVATE_TARGETS=false to allow');
     }
   }
 
