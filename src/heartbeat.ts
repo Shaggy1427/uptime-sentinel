@@ -18,6 +18,13 @@ export interface HeartbeatOptions {
 }
 
 /**
+ * Grace added on top of two full check cycles before a silent scheduler counts
+ * as stalled. Two cycles already absorbs a slow poll; this covers timer jitter
+ * and a check that runs long, so a healthy-but-busy loop is not called dead.
+ */
+const IDLE_GRACE_MS = 60_000;
+
+/**
  * Outbound dead-man's-switch.
  *
  * Every other alert here depends on this process being alive to send it. If the
@@ -84,7 +91,7 @@ export class Heartbeat {
     }
 
     const idleMs = now - health.lastCheckAt;
-    if (idleMs > cycleMs * 2 + 60_000) {
+    if (idleMs > cycleMs * 2 + IDLE_GRACE_MS) {
       return `no check has completed in ${Math.round(idleMs / 1000)}s`;
     }
 

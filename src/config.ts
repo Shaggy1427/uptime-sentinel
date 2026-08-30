@@ -16,6 +16,9 @@ function int(key: string, fallback: number, min?: number, max?: number): number 
   return n;
 }
 
+/** Reported by /api/health and as a label on sentinel_build_info. */
+export const VERSION = '0.1.0';
+
 const dataDir = path.resolve(str('DATA_DIR', './data'));
 
 /**

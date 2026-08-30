@@ -11,6 +11,7 @@ import {
   openIncidentFor,
   pruneChecks,
   resolveIncident,
+  db,
 } from './db.ts';
 import { runCheck } from './checks/index.ts';
 import { dispatch } from './notify/index.ts';
@@ -198,6 +199,25 @@ export class Scheduler {
   async runNow(monitorId: number): Promise<CheckResult | null> {
     const monitor = getMonitor(monitorId);
     if (!monitor || monitor.paused) return null;
+
+    // A suppressed monitor is one whose dependency is down, so its own result is
+    // meaningless. The scheduled path skips it entirely; a manual check must do
+    // the same, or it records a not-our-fault failure into the uptime figure and
+    // fires a DOWN alert for something the operator already knows about.
+    const blockedBy = this.suppressor(monitor);
+    if (blockedBy) {
+      const state = this.states.get(monitor.id) ?? freshState();
+      this.states.set(monitor.id, state);
+      state.status = 'suppressed';
+      state.suppressedBy = blockedBy.id;
+      return {
+        ok: false,
+        statusCode: null,
+        latencyMs: null,
+        error: `Not checked: "${blockedBy.name}" is down`,
+      };
+    }
+
     return this.execute(monitor);
   }
 
@@ -358,7 +378,18 @@ export class Scheduler {
     if (config.retentionDays <= 0) return;
     const cutoff = Date.now() - config.retentionDays * 86_400_000;
     const removed = pruneChecks(cutoff);
-    if (removed > 0) console.log(`[prune] removed ${removed} check rows older than ${config.retentionDays}d`);
+    if (removed === 0) return;
+    console.log(`[prune] removed ${removed} check rows older than ${config.retentionDays}d`);
+
+    // Reclaim the freed pages so the file does not sit at its high-water mark
+    // forever. Only worth the full-file rewrite when a prune actually deleted
+    // rows, and it must never take the scheduler down: VACUUM needs a moment of
+    // exclusive access and scratch disk space, neither guaranteed on a Pi.
+    try {
+      db.exec('VACUUM');
+    } catch (err) {
+      console.warn(`[prune] VACUUM skipped: ${(err as Error).message}`);
+    }
   }
 
   /**

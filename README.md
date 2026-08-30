@@ -352,8 +352,91 @@ Everything the dashboard does is a plain REST call, so you can script it.
 | `POST` | `/api/monitors/:id/check` | Run a check right now |
 | `GET` | `/api/incidents` | Incident history |
 | `POST` | `/api/test-notification` | Send a test push |
+| `GET` | `/metrics` | Prometheus metrics. Auth required when `AUTH_PASSWORD` is set |
 
 With `AUTH_PASSWORD` set, pass `Authorization: Bearer <password>`.
+
+## Prometheus
+
+`GET /metrics` exposes every monitor's state in the Prometheus text format. When
+`AUTH_PASSWORD` is set it sits behind the same auth as the rest of the API, so
+hand Prometheus the password as a bearer token:
+
+```yaml
+scrape_configs:
+  - job_name: uptime-sentinel
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['raspberrypi.local:8080']
+    # Only needed when AUTH_PASSWORD is set:
+    authorization:
+      credentials: 'your-dashboard-password'
+```
+
+Per-monitor series, all gauges labelled `monitor` (name) and `id`:
+
+| Metric | Meaning |
+|--------|---------|
+| `sentinel_monitor_status{status=…}` | one series per state (`up`, `down`, `pending`, `suppressed`, `paused`); the current one is `1`, the rest `0` |
+| `sentinel_monitor_up` | `1` when the last check passed, `0` otherwise — see the warning below |
+| `sentinel_monitor_up_ratio{window=…}` | pass ratio over `1d` / `7d` / `30d` |
+| `sentinel_monitor_avg_latency_seconds{window=…}` | mean latency of passing checks over the same windows |
+| `sentinel_monitor_last_check_latency_seconds` | latency of the most recent check |
+| `sentinel_monitor_last_check_timestamp_seconds` | when the most recent check ran |
+| `sentinel_monitor_down_since_seconds` | age of the current incident; absent unless down |
+| `sentinel_monitor_consecutive_failures` | failed checks in the current streak |
+| `sentinel_monitor_info` | metadata (`type`, `parent`); always `1` |
+
+And about the install as a whole:
+
+| Metric | Meaning |
+|--------|---------|
+| `sentinel_monitors_total` / `_down` / `_suppressed` / `_paused` | counts by state |
+| `sentinel_incidents_open` | unresolved incidents |
+| `sentinel_last_check_timestamp_seconds` | newest check across all monitors |
+| `sentinel_uptime_seconds` | seconds since the process started |
+| `sentinel_build_info{version=…}` | always `1` |
+
+**Alert on `status`, not on `up`.** `sentinel_monitor_up` is `0` for *every*
+state that is not up — including `paused`, `pending` (never checked yet) and
+`suppressed` (a dependency is down). A rule of `sentinel_monitor_up == 0` will
+therefore page you for monitors you deliberately paused, and undo the
+dependency grouping. Use the state you actually mean:
+
+```yaml
+- alert: MonitorDown
+  expr: sentinel_monitor_status{status="down"} == 1
+  for: 2m
+```
+
+Because every state is emitted for every monitor, that query returns `0` rather
+than nothing while things are healthy, so graphs and `sum by (status)` have no
+holes in them.
+
+Series with no data are left out rather than reported as zero — a monitor that
+has never run has no `_last_check_timestamp_seconds`, and a window with no
+checks in it has no `_up_ratio`. "No data" and "nothing passed" are different
+answers.
+
+A scrape costs three SQLite queries no matter how many monitors you have.
+
+### Watching the watcher
+
+`sentinel_last_check_timestamp_seconds` is the one to alert on if you want
+Prometheus to notice this process wedging, since a scheduler that has stalled
+still serves a perfectly healthy-looking `/metrics`:
+
+```yaml
+- alert: SentinelStalled
+  expr: time() - sentinel_last_check_timestamp_seconds > 600
+  for: 5m
+```
+
+That only catches a *running* process that stopped checking. If the host dies
+the endpoint stops answering entirely, which Prometheus reports as the scrape
+target being `up == 0` — and if Prometheus itself is on the same box that dies,
+neither of them is left to tell you. That is what `HEARTBEAT_URL` is for; see
+[Nothing watches the watcher](#nothing-watches-the-watcher).
 
 ## Security
 
@@ -380,6 +463,10 @@ returned by the API — responses show the header names with `<redacted>` values
 
 **`/api/health` is deliberately unauthenticated** so an external dead-man's-switch
 can poll it. It returns only counts and a version, never targets.
+
+**`/metrics` follows the API, not `/api/health`.** It carries monitor names and
+per-monitor state, so when `AUTH_PASSWORD` is set the scraper must authenticate
+(bearer token). With no password set it is open, like everything else.
 
 **Behind a reverse proxy**, set `TRUST_PROXY=true` so rate limits key on the real
 client rather than the proxy. Do not set it otherwise: without a proxy stripping

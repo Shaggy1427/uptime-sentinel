@@ -150,6 +150,16 @@ test('reports non-JSON clearly rather than crashing', async () => {
   assert.match(r.error ?? '', /not valid JSON/);
 });
 
+test('a valid response larger than the body cap is reported as too large, not "invalid JSON"', async () => {
+  // 2 MB+ of perfectly valid JSON. The assertion target is present and correct;
+  // the check must not claim the endpoint returned garbage.
+  payload = JSON.stringify({ pad: 'x'.repeat(2 * 1024 * 1024 + 1024), state: 'STARTED' });
+  const r = await jsonCheck(monitor({ jsonPath: 'state', jsonOperator: 'eq', jsonExpected: 'STARTED' }));
+  assert.equal(r.ok, false);
+  assert.doesNotMatch(r.error ?? '', /not valid JSON/, 'the body is valid JSON, just too big to buffer');
+  assert.match(r.error ?? '', /larger than .*MB/i);
+});
+
 test('a bad HTTP status is reported before the assertion is attempted', async () => {
   statusCode = 503;
   const r = await jsonCheck(monitor({ jsonPath: 'array.state', jsonOperator: 'eq', jsonExpected: 'STARTED' }));
