@@ -197,6 +197,18 @@ export function getMonitor(id: number): Monitor | null {
   return r ? toMonitor(r) : null;
 }
 
+/**
+ * The first monitor in the same name-sorted order listMonitors uses.
+ *
+ * The test-notification fallback only needs one row; listMonitors()[0]
+ * mapped every monitor in the database (headers JSON.parse included) to
+ * reach it.
+ */
+export function firstMonitor(): Monitor | null {
+  const r = db.prepare('SELECT * FROM monitors ORDER BY name COLLATE NOCASE LIMIT 1').get() as Row | undefined;
+  return r ? toMonitor(r) : null;
+}
+
 export function createMonitor(input: MonitorInput): Monitor {
   const now = Date.now();
   const d = config.defaults;

@@ -415,7 +415,7 @@ export async function buildServer() {
     const { monitorId } = (req.body ?? {}) as { monitorId?: unknown };
     const wantId =
       typeof monitorId === 'number' && Number.isSafeInteger(monitorId) && monitorId > 0 ? monitorId : null;
-    const monitor = wantId !== null ? store.getMonitor(wantId) : store.listMonitors()[0];
+    const monitor = wantId !== null ? store.getMonitor(wantId) : store.firstMonitor();
     const subject: Monitor = monitor ?? {
       id: 0,
       name: 'uptime-sentinel',
