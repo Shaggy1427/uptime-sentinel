@@ -28,9 +28,12 @@ test('protected endpoints require auth', async () => {
   const res = await app.inject({ method: 'GET', url: '/api/status' });
   assert.equal(res.statusCode, 401);
 
-  const open = await app.inject({ method: 'GET', url: '/api/auth' });
-  assert.equal(open.statusCode, 200);
-  assert.equal(open.json().required, true);
+  // /api/auth used to be the "is auth on?" probe. It was unauthenticated,
+  // unlimited, and not actually used by the dashboard. Confirming 401 here
+  // is the new behaviour: clients learn whether auth is required by trying
+  // /api/status and seeing the 401, not by querying a separate oracle.
+  const gone = await app.inject({ method: 'GET', url: '/api/auth' });
+  assert.equal(gone.statusCode, 404);
 });
 
 test('password and bearer token grant access', async () => {
