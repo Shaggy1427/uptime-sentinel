@@ -24,6 +24,9 @@
       <h1>Uptime Sentinel</h1>
     </div>
     <div id="summary" class="summary"></div>
+    <!-- Outside #summary on purpose: renderSummary replaces that element's
+         children every poll, and does not run at all when a poll fails. -->
+    <span id="connection" class="stale-warning hidden" role="status"></span>
     <div class="actions">
       <button id="btn-export" class="ghost" title="Download every monitor as a JSON file">Export</button>
       <button id="btn-import" class="ghost" title="Add or update monitors from a JSON file">Import</button>
