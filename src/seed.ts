@@ -1,13 +1,25 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { createMonitor, listMonitors } from './db.ts';
-import { validateMonitor } from './validate.ts';
+import { createMonitor, getMonitor, listMonitors, updateMonitor, wouldCreateCycle } from './db.ts';
+import { validateMonitor, type ValidateOptions } from './validate.ts';
 import type { MonitorInput } from './types.ts';
+
+/** Dependency-graph access for the validator, same shape server.ts hands it. */
+const GRAPH: NonNullable<ValidateOptions['graph']> = {
+  exists: (id) => getMonitor(id) !== null,
+  wouldCreateCycle: (selfId, parentId) => wouldCreateCycle(selfId, parentId),
+};
 
 /**
  * On an empty database, import monitors from a JSON file so a fresh container
  * comes up already watching things. Never overwrites an existing database --
  * once you have monitors, the UI is the source of truth.
+ *
+ * Dependencies are applied in a second pass: seed ids are AUTOINCREMENT and
+ * bear no relation to the file, so an entry points at its parent by `"parent":
+ * "<name of another entry>"` (recommended) or by a literal `"parentId": <n>`.
+ * Either way the reference is validated against the real graph once every row
+ * exists, so a bad or forward reference is reported, not silently dropped.
  */
 export function seedIfEmpty(): number {
   if (listMonitors().length > 0) return 0;
@@ -41,16 +53,52 @@ export function seedIfEmpty(): number {
     return 0;
   }
 
+  // Pass 1: create every monitor without its parent link.
   let created = 0;
+  const idByName = new Map<string, number | null>(); // null marks an ambiguous (duplicated) name
+  const linkLater: { id: number; name: string; parent: unknown; parentId: unknown }[] = [];
+
   for (const entry of parsed) {
     try {
-      const input = validateMonitor(entry, { partial: false }) as MonitorInput;
-      createMonitor(input);
+      if (typeof entry !== 'object' || entry === null) throw new Error('entry must be an object');
+      const { parent, parentId, ...rest } = entry as Record<string, unknown>;
+      const input = validateMonitor(rest, { partial: false, graph: GRAPH }) as MonitorInput;
+      const monitor = createMonitor(input);
       created++;
+      idByName.set(monitor.name, idByName.has(monitor.name) ? null : monitor.id);
+      if (parent !== undefined || (parentId !== undefined && parentId !== null)) {
+        linkLater.push({ id: monitor.id, name: monitor.name, parent, parentId });
+      }
     } catch (err) {
       console.error(`[seed] skipped an entry: ${(err as Error).message}`);
     }
   }
+
+  // Pass 2: resolve and apply parent links now that all rows exist.
+  for (const link of linkLater) {
+    try {
+      let parentId: number;
+      if (typeof link.parent === 'string') {
+        const resolved = idByName.get(link.parent.trim());
+        if (resolved === undefined) throw new Error(`no seeded monitor is named "${link.parent}"`);
+        if (resolved === null) throw new Error(`more than one seeded monitor is named "${link.parent}"`);
+        parentId = resolved;
+      } else if (link.parent !== undefined) {
+        throw new Error('"parent" must be the name of another monitor');
+      } else {
+        parentId = link.parentId as number; // validated by validateMonitor below
+      }
+
+      const patch = validateMonitor(
+        { parentId },
+        { partial: true, current: getMonitor(link.id)!, graph: GRAPH },
+      );
+      updateMonitor(link.id, patch);
+    } catch (err) {
+      console.error(`[seed] "${link.name}": could not set parent: ${(err as Error).message}`);
+    }
+  }
+
   console.log(`[seed] imported ${created} monitor(s) from ${file}`);
   return created;
 }
