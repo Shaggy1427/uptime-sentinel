@@ -30,9 +30,13 @@ const OPEN_ROUTES = new Set(['/api/health', '/api/login', '/api/auth']);
  * (a bearer token, an API key). Those are write-only as far as the API is
  * concerned: keep the header names visible so the UI can show what is set,
  * but never send the values back out.
+ *
+ * A monitor with no headers has nothing to withhold, so it is returned
+ * unchanged -- describe() runs this for every monitor on every dashboard
+ * poll, and most monitors carry no headers.
  */
 function redact(monitor: Monitor) {
-  if (!monitor.headers) return { ...monitor, headers: null };
+  if (!monitor.headers) return monitor;
   const masked: Record<string, string> = {};
   for (const key of Object.keys(monitor.headers)) masked[key] = '<redacted>';
   return { ...monitor, headers: masked };
