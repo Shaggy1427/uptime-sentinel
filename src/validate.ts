@@ -5,7 +5,7 @@ import { parsePath, PathError } from './checks/jsonpath.ts';
 import type { Monitor, MonitorInput, MonitorType } from './types.ts';
 
 const TYPES: MonitorType[] = ['http', 'tcp', 'ping', 'json'];
-const METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'];
+export const METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'];
 
 /** RFC 7230 token characters -- the only thing legal in an HTTP header name. */
 const HEADER_NAME = /^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$/;
