@@ -154,3 +154,46 @@ test('a manual check is refused while suppressed by a down dependency', async ()
   assert.deepEqual(attempts, [], 'no alert attempted');
   assert.equal(scheduler.getState(childId)?.status, 'suppressed');
 });
+
+test('pausing mid-incident closes it silently; resume sends no RECOVERED', async () => {
+  await scheduler.runNow(monitorId); // 503 -> down, incident opens, DOWN alert
+  assert.equal(scheduler.getState(monitorId)?.status, 'down');
+  assert.ok(store.openIncidentFor(monitorId), 'incident is open');
+  assert.deepEqual(sent, ['down']);
+
+  store.updateMonitor(monitorId, { paused: true });
+  scheduler.sync();
+
+  assert.equal(store.openIncidentFor(monitorId), null, 'incident closed at the pause');
+  assert.equal(store.listIncidents(10, monitorId)[0]?.resolvedAt !== null, true, 'the row is resolved, not deleted');
+  assert.equal(scheduler.getState(monitorId)?.status, 'paused');
+
+  sent.length = 0;
+  attempts.length = 0;
+
+  mode = 200; // recovered while paused
+  store.updateMonitor(monitorId, { paused: false });
+  scheduler.sync();
+  await scheduler.runNow(monitorId);
+
+  assert.deepEqual(attempts, [], 'no alert even attempted on resume');
+  assert.deepEqual(sent, [], 'no RECOVERED for an outage that was paused away');
+  assert.equal(scheduler.getState(monitorId)?.status, 'up');
+});
+
+test('a failure after resume opens a fresh incident, not the stale one', async () => {
+  await scheduler.runNow(monitorId);
+  const firstId = store.openIncidentFor(monitorId)!.id;
+
+  store.updateMonitor(monitorId, { paused: true });
+  scheduler.sync();
+  store.updateMonitor(monitorId, { paused: false });
+  scheduler.sync();
+  assert.equal(scheduler.getState(monitorId)?.consecutiveFailures ?? 0, 0, 'streak reset on pause');
+
+  await scheduler.runNow(monitorId); // still 503 -> down again
+  const open = store.openIncidentFor(monitorId)!;
+
+  assert.notEqual(open.id, firstId, 'a new incident, not the stale one reopened');
+  assert.equal(store.listIncidents(10, monitorId).length, 2);
+});

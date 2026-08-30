@@ -196,6 +196,11 @@ failed checks), 24-hour and 30-day uptime, and buttons to check it now, pause it
 edit it, or delete it. Below the cards is the incident history, including whether
 each outage was long enough to actually notify you.
 
+Pausing a monitor stops all checks for it. If it was mid-outage, that incident
+is closed at the moment you pause — no RECOVERED notification, since it was
+silenced rather than fixed — and when you resume, the next failure starts a
+fresh incident rather than one that counts the paused time as downtime.
+
 If you set `AUTH_PASSWORD`, you get a login prompt first.
 
 <details>
