@@ -132,7 +132,11 @@ function describe(monitor: Monitor, ctx: StatusContext) {
     lastResult: state?.lastResult ?? null,
     lastCheckedAt: state?.lastCheckedAt ?? newestCheckAt,
     nextCheckAt: state?.nextCheckAt ?? null,
-    downSinceMs: incident ? now - incident.startedAt : null,
+    // The downtime clock only runs while the monitor is actually down. An
+    // incident can stay open while checks pass (RECOVERED delivery still
+    // retrying) or while the monitor is suppressed by an ancestor -- reporting
+    // downtime then would describe an outage that is not happening.
+    downSinceMs: incident && state?.status === 'down' ? now - incident.startedAt : null,
     alerted: incident?.alertedAt !== null && incident !== null,
     incident,
     history,

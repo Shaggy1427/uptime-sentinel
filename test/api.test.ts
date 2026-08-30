@@ -12,6 +12,7 @@ process.env.AUTH_PASSWORD = '';
 // Imported after env is set: config and the database are read at module load.
 const { buildServer } = await import('../src/server.ts');
 const store = await import('../src/db.ts');
+const { scheduler } = await import('../src/scheduler.ts');
 
 let app: Awaited<ReturnType<typeof buildServer>>;
 
@@ -265,6 +266,18 @@ test('/api/status batches history, uptime windows and open incidents', async () 
   store.insertCheck(b.id, { ok: true, statusCode: 200, latencyMs: 5, error: null }, now - 1000);
 
   store.createIncident(a.id, now - 2500, 'boom');
+  // An open incident means the monitor is down (this is what rehydrate()
+  // restores after a restart); plant that state so the response reflects it.
+  scheduler['states'].set(a.id, {
+    status: 'down',
+    consecutiveFailures: 1,
+    firstFailureAt: now - 2500,
+    lastResult: { ok: false, statusCode: 500, latencyMs: null, error: 'boom' },
+    lastCheckedAt: now - 1000,
+    nextCheckAt: null,
+    inFlight: false,
+    suppressedBy: null,
+  });
 
   const status = (await app.inject({ method: 'GET', url: '/api/status' })).json();
   const byName = new Map(status.monitors.map((m: { name: string }) => [m.name, m]));
