@@ -201,7 +201,8 @@ export function validateMonitor(input: unknown, { partial, current, graph }: Val
     if (operator !== 'exists' && operator !== 'not_exists' && (expected === null || expected === '')) {
       throw new ValidationError(`jsonExpected is required when jsonOperator is "${operator}"`);
     }
-    if (!has('jsonOperator') && !current?.jsonOperator) out.jsonOperator = 'exists';
+    // Ensure jsonOperator has a default value for JSON monitors
+    if (!out.jsonOperator) out.jsonOperator = 'exists';
   }
 
   if (has('parentId')) {
