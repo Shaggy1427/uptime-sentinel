@@ -5,13 +5,14 @@ import type { FastifyError } from 'fastify';
 import fastifyStatic from '@fastify/static';
 import fastifyCookie from '@fastify/cookie';
 import fastifyRateLimit from '@fastify/rate-limit';
-import { config } from './config.ts';
+import { config, VERSION } from './config.ts';
 import * as store from './db.ts';
 import { scheduler } from './scheduler.ts';
 import { dispatch } from './notify/index.ts';
 import { validateMonitor, ValidationError } from './validate.ts';
 import type { ValidateOptions } from './validate.ts';
 import { cookieSecret, secretEquals } from './secret.ts';
+import { renderMetrics } from './metrics.ts';
 import type { Monitor } from './types.ts';
 
 const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
@@ -136,7 +137,11 @@ export async function buildServer() {
     // like req.url.startsWith('/api/') misses "/%61pi/status" -- which reaches
     // the handler as /api/status and would run without ever being challenged.
     const route = req.routeOptions?.url;
-    if (!route || !route.startsWith('/api/')) return;
+    if (!route) return;
+    // `/metrics` is not under `/api/` but carries the same monitor names and
+    // states as `/api/status`, so it is challenged the same way. Prometheus
+    // sends the password as a bearer token.
+    if (!route.startsWith('/api/') && route !== '/metrics') return;
     if (OPEN_ROUTES.has(route)) return;
 
     const bearer = req.headers.authorization?.replace(/^Bearer\s+/i, '');
@@ -207,12 +212,21 @@ export async function buildServer() {
     const suppressed = monitors.filter((m) => !m.paused && scheduler.getState(m.id)?.status === 'suppressed');
     return {
       ok: true,
-      version: '0.1.0',
+      version: VERSION,
       monitors: monitors.length,
       down: down.length,
       suppressed: suppressed.length,
       uptimeS: Math.round(process.uptime()),
     };
+  });
+
+  // --------------------------------------------------------------- metrics
+
+  // Prometheus text exposition. Behind the same auth as /api/* when a
+  // password is set; open otherwise, like the rest of the app on a trusted LAN.
+  app.get('/metrics', async (_req, reply) => {
+    reply.header('content-type', 'text/plain; version=0.0.4; charset=utf-8');
+    return renderMetrics();
   });
 
   // -------------------------------------------------------------- monitors
