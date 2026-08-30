@@ -416,6 +416,10 @@ export async function buildServer() {
     const wantId =
       typeof monitorId === 'number' && Number.isSafeInteger(monitorId) && monitorId > 0 ? monitorId : null;
     const monitor = wantId !== null ? store.getMonitor(wantId) : store.listMonitors()[0];
+    // An explicitly requested monitor must exist. Falling through to the
+    // placeholder would send a 200 test alert for a monitor that does not,
+    // leaving the operator to believe they verified the wrong thing.
+    if (wantId !== null && !monitor) return reply.code(404).send({ error: 'Monitor not found' });
     const subject: Monitor = monitor ?? {
       id: 0,
       name: 'uptime-sentinel',

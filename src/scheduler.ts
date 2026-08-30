@@ -31,6 +31,17 @@ interface RuntimeState {
   suppressedBy: number | null;
 }
 
+/**
+ * Threshold for whether to run VACUUM after a prune. Two conditions must hold:
+ * the freelist must be at least `MIN_VACUUM_PAGES` pages and at least
+ * `MIN_VACUUM_FRACTION` of the file. The absolute floor protects small
+ * installs (4 MB of free space on a 50 MB database is a clear win; the same
+ * 4 MB on a 5 MB database is the whole file); the relative floor protects
+ * the prune that just freed a handful of rows from a busy install.
+ */
+const MIN_VACUUM_PAGES = 1024;
+const MIN_VACUUM_FRACTION = 0.05;
+
 function freshState(): RuntimeState {
   return {
     status: 'pending',
@@ -120,12 +131,17 @@ export class Scheduler {
         // the first check after a resume computes downtime from the original
         // startedAt -- the whole paused span -- and emits a RECOVERED (or a
         // late DOWN) citing hours that were just the monitor sitting paused.
-        if (state.status === 'down') {
-          const incident = openIncidentFor(monitor.id);
-          if (incident) {
-            resolveIncident(incident.id, Date.now());
-            console.log(`[scheduler] "${monitor.name}" paused with an open incident; closed it silently`);
-          }
+        //
+        // Decided on the database, not the in-memory status: an incident can
+        // be open while the status is anything but 'down' -- handleUp leaves
+        // it open when every RECOVERED dispatch failed, and a monitor whose
+        // ancestor died mid-outage flips to 'suppressed' with the incident
+        // still open. Gating on state.status === 'down' left those incidents
+        // open across the pause.
+        const incident = openIncidentFor(monitor.id);
+        if (incident) {
+          resolveIncident(incident.id, Date.now());
+          console.log(`[scheduler] "${monitor.name}" paused with an open incident; closed it silently`);
         }
 
         state.status = 'paused';
@@ -335,8 +351,14 @@ export class Scheduler {
     state.consecutiveFailures += 1;
     if (state.firstFailureAt === null) state.firstFailureAt = now;
 
-    // Not enough consecutive failures yet - treat as a blip, stay quiet.
-    if (state.consecutiveFailures < Math.max(1, monitor.retries)) {
+    // Not enough consecutive failures yet - treat as a blip, stay quiet --
+    // unless the monitor is already marked down. That combination can only
+    // come from rehydrate(): an incident that was open at shutdown, whose
+    // restored streak (incident.checksFailed) is shorter than a `retries`
+    // value raised while the outage was in flight. The monitor IS down and
+    // its alerts are mid-flight; degrading to 'pending' would stall the
+    // reminders and misreport the outage until the streak rebuilt.
+    if (state.consecutiveFailures < Math.max(1, monitor.retries) && state.status !== 'down') {
       state.status = 'pending';
       return;
     }
@@ -405,10 +427,25 @@ export class Scheduler {
     console.log(`[prune] removed ${removed} check rows older than ${config.retentionDays}d`);
 
     // Reclaim the freed pages so the file does not sit at its high-water mark
-    // forever. Only worth the full-file rewrite when a prune actually deleted
-    // rows, and it must never take the scheduler down: VACUUM needs a moment of
-    // exclusive access and scratch disk space, neither guaranteed on a Pi.
+    // forever. Only worth the full-file rewrite when the freelist is a
+    // noticeable fraction of the file: VACUUM rewrites the whole database
+    // whether there is one page to free or ten thousand, and the cost is paid
+    // on a Pi SD card where write throughput is the bottleneck. A small prune
+    // of a few hundred rows on a busy install only frees a handful of pages;
+    // rebuilding a 50 MB database to free 400 KB is not worth the I/O.
     try {
+      const free = Number(
+        (db.prepare('PRAGMA freelist_count').get() as { freelist_count: number }).freelist_count,
+      );
+      const total = Number((db.prepare('PRAGMA page_count').get() as { page_count: number }).page_count);
+      const fraction = total > 0 ? free / total : 0;
+      if (free < MIN_VACUUM_PAGES || fraction < MIN_VACUUM_FRACTION) {
+        console.log(
+          `[prune] skipping VACUUM: ${free} free pages of ${total} ` +
+            `(${(fraction * 100).toFixed(1)}%) is below the threshold`,
+        );
+        return;
+      }
       db.exec('VACUUM');
     } catch (err) {
       console.warn(`[prune] VACUUM skipped: ${(err as Error).message}`);

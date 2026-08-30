@@ -44,6 +44,16 @@ test('readPath never walks the prototype chain', () => {
 test('parsePath rejects malformed paths instead of guessing', () => {
   assert.throws(() => parsePath(''), PathError);
   assert.throws(() => parsePath('   '), PathError);
+  // Each of these would previously be read as a shorter or different path:
+  // "state]" as "state", "a..b" as "a.b", "a[0]b" as "a[0].b".
+  assert.throws(() => parsePath('state]'), PathError, 'trailing junk must not shorten the path');
+  assert.throws(() => parsePath('a..b'), PathError, 'a doubled dot must not merge two levels');
+  assert.throws(() => parsePath('a[0]b'), PathError, 'a missing dot after ] must not be guessed');
+  // The documented forms still parse.
+  assert.equal(parsePath('array.state').length, 2);
+  assert.equal(parsePath('disks[0].health').length, 3);
+  assert.equal(parsePath('disks[*].health').length, 3);
+  assert.equal(parsePath('$.array.state').length, 2);
 });
 
 test('a distinguishing case a substring match cannot handle', () => {
