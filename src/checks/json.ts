@@ -31,11 +31,23 @@ export async function jsonCheck(monitor: Monitor): Promise<CheckResult> {
   try {
     const res = await fetch(monitor.target, buildInit(monitor));
     const statusCode = res.status;
-    const body = await readBodyCapped(res, BODY_CAP_BYTES);
+    const { body, truncated } = await readBodyCapped(res, BODY_CAP_BYTES);
     const latencyMs = Math.round(performance.now() - started);
 
     if (!accepts(statusCode)) {
       return { ok: false, statusCode, latencyMs, error: `HTTP ${statusCode} ${res.statusText}`.trim() };
+    }
+
+    if (truncated) {
+      // A prefix of valid JSON is not valid JSON. Say what actually happened
+      // instead of "not valid JSON", which sends the operator chasing a bug in
+      // an endpoint that is fine.
+      return {
+        ok: false,
+        statusCode,
+        latencyMs,
+        error: `Response is larger than ${Math.round(BODY_CAP_BYTES / (1024 * 1024))} MB; cannot parse it to assert on`,
+      };
     }
 
     let document: unknown;
