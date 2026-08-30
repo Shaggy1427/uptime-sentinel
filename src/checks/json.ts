@@ -1,5 +1,5 @@
 import { parseAcceptedStatus } from './status.ts';
-import { BODY_CAP_BYTES, buildInit, describeFetchError, readBodyCapped } from './request.ts';
+import { BODY_CAP_BYTES, buildInit, describeFetchError, readBodyCapped, redirectOutcome } from './request.ts';
 import { readPath, PathError } from './jsonpath.ts';
 import { assertValues, isOperator } from './assert.ts';
 import type { CheckResult, Monitor } from '../types.ts';
@@ -31,6 +31,13 @@ export async function jsonCheck(monitor: Monitor): Promise<CheckResult> {
   try {
     const res = await fetch(monitor.target, buildInit(monitor));
     const statusCode = res.status;
+
+    // A 3xx is never followed (see buildInit); decide on it before reading body.
+    if (statusCode >= 300 && statusCode < 400) {
+      await res.body?.cancel().catch(() => {});
+      return redirectOutcome(statusCode, res.headers.get('location'), accepts, Math.round(performance.now() - started));
+    }
+
     const { body, truncated } = await readBodyCapped(res, BODY_CAP_BYTES);
     const latencyMs = Math.round(performance.now() - started);
 

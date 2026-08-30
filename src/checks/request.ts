@@ -1,5 +1,5 @@
 import { Agent } from 'undici';
-import type { Monitor } from '../types.ts';
+import type { CheckResult, Monitor } from '../types.ts';
 
 /**
  * Shared HTTP plumbing for the checks that speak HTTP (http, json).
@@ -21,11 +21,42 @@ export function buildInit(monitor: Monitor): RequestInit {
   const init: Record<string, unknown> = {
     method: monitor.method || 'GET',
     headers: { 'user-agent': USER_AGENT, ...(monitor.headers ?? {}) },
-    redirect: 'follow',
+    // Do not chase redirects. The operator validated the target they typed;
+    // the Location of a 3xx is chosen by the remote server, so following it
+    // turns a monitor into a request primitive against whatever this host can
+    // route to (loopback, RFC1918, link-local metadata) and lets a redirect to
+    // "always-up.example" mask a dead service. An un-followed 3xx is surfaced
+    // as its own outcome instead -- see redirectOutcome().
+    redirect: 'manual',
     signal: AbortSignal.timeout(monitor.timeoutMs),
   };
   if (monitor.ignoreTls) init.dispatcher = insecureAgent;
   return init as RequestInit;
+}
+
+/**
+ * The check result for a 3xx that `redirect: 'manual'` left unfollowed.
+ *
+ * A monitor whose `acceptedStatus` covers the code is treated as up -- the
+ * operator has said "this URL moving is the healthy state, don't chase it".
+ * Otherwise it is a failure that names where the redirect pointed and how to
+ * opt in, rather than a bare "HTTP 301".
+ */
+export function redirectOutcome(
+  status: number,
+  location: string | null,
+  accepts: (code: number) => boolean,
+  latencyMs: number,
+): CheckResult {
+  if (accepts(status)) return { ok: true, statusCode: status, latencyMs, error: null };
+  return {
+    ok: false,
+    statusCode: status,
+    latencyMs,
+    error:
+      `Redirect ${status}${location ? ` to ${location}` : ''} was not followed; ` +
+      `add ${status} to this monitor's accepted status if the redirect itself is the expected response`,
+  };
 }
 
 export interface CappedBody {
