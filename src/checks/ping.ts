@@ -18,10 +18,11 @@ export function pingCheck(monitor: Monitor): Promise<CheckResult> {
     });
   }
 
-  // Linux iputils ping takes -W in seconds, but BSD/macOS ping takes
-  // milliseconds there - pass the right unit for the platform.
-  const deadlineArg =
-    process.platform === 'darwin' ? String(monitor.timeoutMs) : String(Math.max(1, Math.ceil(monitor.timeoutMs / 1000)));
+  // Both Linux iputils ping and BSD/macOS ping take -W in seconds.
+// Windows ping -w takes milliseconds, but this project targets
+// Linux/Unix platforms (Raspberry Pi/Unraid homelab).
+// Convert ms → s for -W, with a minimum of 1 second.
+  const deadlineArg = String(Math.max(1, Math.ceil(monitor.timeoutMs / 1000)));
 
   return new Promise((resolve) => {
     const started = performance.now();
