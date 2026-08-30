@@ -5,14 +5,17 @@ FROM node:24-bookworm-slim AS build
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm ci
+# The npm download cache persists across image builds in a BuildKit-managed
+# volume, so dependency changes re-fetch only what moved and CI's multi-arch
+# build stops re-downloading the whole tree on every platform.
+RUN --mount=type=cache,target=/root/.npm npm ci
 
 COPY tsconfig.json ./
 COPY src ./src
 RUN npm run build
 
 # Reduce to production dependencies only.
-RUN npm ci --omit=dev && npm cache clean --force
+RUN --mount=type=cache,target=/root/.npm npm ci --omit=dev && npm cache clean --force
 
 # ---------- runtime ----------
 FROM node:24-bookworm-slim AS runtime
