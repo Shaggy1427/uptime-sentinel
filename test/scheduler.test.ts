@@ -181,6 +181,27 @@ test('pausing mid-incident closes it silently; resume sends no RECOVERED', async
   assert.equal(scheduler.getState(monitorId)?.status, 'up');
 });
 
+test('pausing closes the incident even when the status is not "down"', async () => {
+  // Open an alerted incident (status 'down').
+  await scheduler.runNow(monitorId);
+  assert.ok(store.openIncidentFor(monitorId), 'incident is open');
+
+  // Recover, but every channel fails: handleUp leaves the incident open for
+  // the retry while the in-memory status moves on to 'up'.
+  mode = 200;
+  deliver = false;
+  await scheduler.runNow(monitorId);
+  assert.ok(store.openIncidentFor(monitorId), 'incident stays open until RECOVERED is delivered');
+  assert.equal(scheduler.getState(monitorId)?.status, 'up');
+
+  // Pausing must still end the incident timeline: the database decides,
+  // not the in-memory status.
+  store.updateMonitor(monitorId, { paused: true });
+  scheduler.sync();
+
+  assert.equal(store.openIncidentFor(monitorId), null, 'incident closed at the pause despite status "up"');
+});
+
 test('a failure after resume opens a fresh incident, not the stale one', async () => {
   await scheduler.runNow(monitorId);
   const firstId = store.openIncidentFor(monitorId)!.id;
