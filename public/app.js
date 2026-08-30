@@ -535,7 +535,13 @@ async function submitLogin(event) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ password: $('#login-password').value }),
     });
-    if (!res.ok) throw new Error('Wrong password');
+    if (!res.ok) {
+      // Surface the server's reason. A 429 from the login rate limit is not a
+      // wrong password: telling someone with the correct password that it is
+      // wrong sends them chasing the one thing that is actually fine.
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || 'Wrong password');
+    }
     $('#login').classList.add('hidden');
     error.classList.add('hidden');
     start();
