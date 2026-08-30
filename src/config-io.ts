@@ -1,6 +1,6 @@
 import * as store from './db.ts';
-import { validateMonitor, ValidationError } from './validate.ts';
-import type { Monitor, MonitorInput } from './types.ts';
+import { validateMaintenance, validateMonitor, ValidationError } from './validate.ts';
+import type { MaintenanceInput, MaintenanceWindow, Monitor, MonitorInput } from './types.ts';
 
 /** Bumped only if the shape changes incompatibly. Import accepts anything it understands. */
 export const CONFIG_VERSION = 1;
@@ -41,10 +41,36 @@ export interface ExportedMonitor {
   paused: boolean;
 }
 
+/**
+ * A maintenance window as it appears in an exported file.
+ *
+ * The monitors it covers are recorded by name for the same reason a
+ * dependency is: ids belong to one install. The schedule fields of the
+ * strategy that is not in use are omitted rather than written as null, so the
+ * file reads as the shape it actually is.
+ */
+export interface ExportedMaintenance {
+  name: string;
+  strategy: 'once' | 'weekly';
+  startsAt?: number;
+  endsAt?: number;
+  startMin?: number;
+  durationS?: number;
+  weekdays?: number;
+  timezone: string;
+  active: boolean;
+  monitors: string[];
+}
+
 export interface ConfigFile {
   version: number;
   exportedAt: number;
   monitors: ExportedMonitor[];
+  /**
+   * Optional so a file written before windows existed, or a hand-written seed
+   * file, still imports cleanly.
+   */
+  maintenance?: ExportedMaintenance[];
 }
 
 export interface ImportReport {
@@ -55,6 +81,10 @@ export interface ImportReport {
   skipped: { name: string; reason: string }[];
   /** Monitors that will have no credentials, because the file did not carry them. */
   needCredentials: string[];
+  /** Maintenance windows added by this import, by name. */
+  maintenanceCreated: string[];
+  /** Maintenance windows the import rewrote, by name. */
+  maintenanceUpdated: string[];
   errors: string[];
 }
 
@@ -99,6 +129,27 @@ function toExported(monitor: Monitor, nameById: Map<number, string>, includeSecr
  * bearer tokens, and the rest of the API treats them as write-only. See
  * `redact()` in server.ts.
  */
+function toExportedMaintenance(window: MaintenanceWindow, nameById: Map<number, string>): ExportedMaintenance {
+  const common = {
+    name: window.name,
+    timezone: window.timezone,
+    active: window.active,
+    // A monitor deleted since the window was written drops out rather than
+    // exporting as null: the window still means something without it.
+    monitors: window.monitorIds.map((id) => nameById.get(id)).filter((n): n is string => n !== undefined),
+  };
+
+  return window.strategy === 'once'
+    ? { ...common, strategy: 'once', startsAt: window.startsAt, endsAt: window.endsAt }
+    : {
+        ...common,
+        strategy: 'weekly',
+        startMin: window.startMin,
+        durationS: window.durationS,
+        weekdays: window.weekdays,
+      };
+}
+
 export function exportConfig({ includeSecrets = false }: { includeSecrets?: boolean } = {}): ConfigFile {
   const monitors = store.listMonitors();
   const nameById = new Map(monitors.map((m) => [m.id, m.name]));
@@ -106,6 +157,7 @@ export function exportConfig({ includeSecrets = false }: { includeSecrets?: bool
     version: CONFIG_VERSION,
     exportedAt: Date.now(),
     monitors: monitors.map((m) => toExported(m, nameById, includeSecrets)),
+    maintenance: store.listMaintenance().map((w) => toExportedMaintenance(w, nameById)),
   };
 }
 
@@ -330,6 +382,142 @@ function applyParents(prepared: Prepared[], idByName: Map<string, number>, repor
  * applies or none of it does -- and `dryRun` runs the entire thing and then
  * rolls back, so the report it returns is what would really happen.
  */
+interface PreparedWindow {
+  name: string;
+  input: MaintenanceInput;
+  /** Monitor names from the file, resolved to ids once the monitors exist. */
+  monitors: string[];
+}
+
+/**
+ * The maintenance array of an exported file, or none.
+ *
+ * A bare array payload is a monitors-only seed file and carries no windows;
+ * anything else is read leniently so a file written before this feature
+ * existed still imports.
+ */
+function maintenanceEntriesOf(payload: unknown): unknown[] {
+  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) return [];
+  const windows = (payload as { maintenance?: unknown }).maintenance;
+  if (windows === undefined || windows === null) return [];
+  if (!Array.isArray(windows)) throw new ValidationError('"maintenance" must be an array of windows');
+  return windows;
+}
+
+/**
+ * Validate every window before touching the database, matching how monitors
+ * are handled: one broken window fails the whole import rather than being
+ * quietly half-applied.
+ */
+function prepareMaintenance(entries: unknown[], errors: string[]): PreparedWindow[] {
+  const prepared: PreparedWindow[] = [];
+
+  entries.forEach((entry, i) => {
+    const position = i + 1;
+    const label = (name?: unknown) =>
+      typeof name === 'string' && name.trim() !== ''
+        ? `maintenance entry ${position} ("${name.trim()}")`
+        : `maintenance entry ${position}`;
+
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+      errors.push(`${label()}: must be a JSON object`);
+      return;
+    }
+
+    const { monitors, monitorIds, ...fields } = entry as Record<string, unknown>;
+
+    // Ids from another install would attach the window to whatever happens to
+    // hold them here, which is the one failure this format exists to avoid.
+    if (monitorIds !== undefined) {
+      errors.push(`${label(fields.name)}: use "monitors" (names) rather than "monitorIds"`);
+      return;
+    }
+    if (monitors !== undefined && !Array.isArray(monitors)) {
+      errors.push(`${label(fields.name)}: "monitors" must be an array of monitor names`);
+      return;
+    }
+
+    const names = (monitors ?? []) as unknown[];
+    if (names.some((n) => typeof n !== 'string')) {
+      errors.push(`${label(fields.name)}: "monitors" must contain monitor names`);
+      return;
+    }
+
+    try {
+      // Validated with an empty monitor set: the names cannot be resolved to
+      // ids until the monitors in this same file have been created.
+      const input = validateMaintenance({ ...fields, monitorIds: [] }, { partial: false });
+      prepared.push({ name: input.name, input, monitors: names as string[] });
+    } catch (err) {
+      if (err instanceof ValidationError) errors.push(`${label(fields.name)}: ${err.message}`);
+      else throw err;
+    }
+  });
+
+  return prepared;
+}
+
+/**
+ * Create or replace each window, merging by name the way monitors merge.
+ *
+ * `idByName` only carries the monitors this file touched, so the current table
+ * is consulted as well: a window may name a monitor that was already here and
+ * is not mentioned in the file.
+ */
+function applyMaintenance(prepared: PreparedWindow[], idByName: Map<string, number>, report: ImportReport): void {
+  if (prepared.length === 0) return;
+
+  const monitorIdByName = new Map(idByName);
+  for (const monitor of store.listMonitors()) {
+    const key = monitor.name.toLowerCase();
+    if (!monitorIdByName.has(key)) monitorIdByName.set(key, monitor.id);
+  }
+
+  const existingByName = new Map<string, MaintenanceWindow[]>();
+  for (const window of store.listMaintenance()) {
+    const key = window.name.toLowerCase();
+    const list = existingByName.get(key);
+    if (list) list.push(window);
+    else existingByName.set(key, [window]);
+  }
+
+  for (const entry of prepared) {
+    const key = entry.name.toLowerCase();
+    const matches = existingByName.get(key) ?? [];
+    if (matches.length > 1) {
+      report.skipped.push({ name: entry.name, reason: `matches ${matches.length} existing maintenance windows` });
+      continue;
+    }
+
+    const monitorIds: number[] = [];
+    let missing: string | null = null;
+    for (const name of entry.monitors) {
+      const id = monitorIdByName.get(name.toLowerCase());
+      if (id === undefined) {
+        missing = name;
+        break;
+      }
+      monitorIds.push(id);
+    }
+    // A window covering a monitor that does not exist would silently cover
+    // less than the file says, so it is refused rather than trimmed.
+    if (missing !== null) {
+      report.errors.push(`maintenance "${entry.name}": no monitor named "${missing}"`);
+      continue;
+    }
+
+    const input = { ...entry.input, monitorIds } as MaintenanceInput;
+    const target = matches[0];
+    if (target) {
+      store.updateMaintenanceIn(target.id, input);
+      report.maintenanceUpdated.push(entry.name);
+    } else {
+      store.createMaintenanceIn(input);
+      report.maintenanceCreated.push(entry.name);
+    }
+  }
+}
+
 export function importConfig(payload: unknown, { dryRun = false }: { dryRun?: boolean } = {}): ImportReport {
   const entries = entriesOf(payload);
 
@@ -340,15 +528,21 @@ export function importConfig(payload: unknown, { dryRun = false }: { dryRun?: bo
     unchanged: [],
     skipped: [],
     needCredentials: [],
+    maintenanceCreated: [],
+    maintenanceUpdated: [],
     errors: [],
   };
 
   const prepared = prepare(entries, report.errors);
+  const preparedWindows = prepareMaintenance(maintenanceEntriesOf(payload), report.errors);
   if (report.errors.length > 0) return report;
 
   return store.transaction(() => {
     const idByName = applyFields(prepared, report);
     applyParents(prepared, idByName, report);
+    // After the monitors, because a window names the monitors it covers and
+    // those may be created by this same file.
+    applyMaintenance(preparedWindows, idByName, report);
 
     const clean = report.errors.length === 0;
     if (!clean) {
@@ -359,6 +553,8 @@ export function importConfig(payload: unknown, { dryRun = false }: { dryRun?: bo
       report.unchanged = [];
       report.skipped = [];
       report.needCredentials = [];
+      report.maintenanceCreated = [];
+      report.maintenanceUpdated = [];
     }
     return { commit: clean && !dryRun, value: report };
   });

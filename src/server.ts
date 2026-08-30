@@ -9,8 +9,9 @@ import { config, VERSION } from './config.ts';
 import * as store from './db.ts';
 import { scheduler } from './scheduler.ts';
 import { dispatch } from './notify/index.ts';
-import { validateMonitor, ValidationError } from './validate.ts';
+import { validateMaintenance, validateMonitor, ValidationError } from './validate.ts';
 import type { ValidateOptions } from './validate.ts';
+import { openRule } from './maintenance.ts';
 import { cookieSecret, passwordMatches } from './secret.ts';
 import { renderMetrics } from './metrics.ts';
 import { exportConfig, importConfig } from './config-io.ts';
@@ -75,6 +76,32 @@ interface StatusContext {
   uptimeByMonitor: Map<number, store.UptimeStats[]>;
   /** Non-paused descendant count per monitor. Pre-baked so describe is O(1). */
   dependentCountByMonitor: Map<number, number>;
+  /**
+   * The maintenance window open over each monitor right now.
+   *
+   * Built once from the whole window table rather than asked per monitor: the
+   * dashboard polls this every 10 seconds, and a query per monitor here is
+   * exactly what the O(1) rule exists to prevent.
+   */
+  maintenanceByMonitor: Map<number, { id: number; name: string }>;
+}
+
+/**
+ * monitorId -> the window covering it, for every monitor, in two queries.
+ *
+ * Windows are resolved here rather than read off the scheduler's state so a
+ * window that was just created shows on the very next poll, instead of only
+ * after each affected monitor has ticked.
+ */
+function openWindowsByMonitor(now: number): Map<number, { id: number; name: string }> {
+  const out = new Map<number, { id: number; name: string }>();
+  for (const window of store.listMaintenance()) {
+    if (!openRule([window], now)) continue;
+    for (const monitorId of window.monitorIds) {
+      if (!out.has(monitorId)) out.set(monitorId, { id: window.id, name: window.name });
+    }
+  }
+  return out;
 }
 
 /**
@@ -104,6 +131,7 @@ function contextForOne(monitor: Monitor): StatusContext {
       ],
     ]),
     dependentCountByMonitor: store.descendantCountMap(monitors),
+    maintenanceByMonitor: openWindowsByMonitor(now),
   };
 }
 
@@ -113,7 +141,14 @@ function describe(monitor: Monitor, ctx: StatusContext) {
   const incident = monitor.paused ? null : (ctx.openIncidentByMonitor.get(monitor.id) ?? null);
 
   const checks = ctx.historyByMonitor.get(monitor.id) ?? [];
-  const history = checks.map((c) => ({ ok: c.ok, latencyMs: c.latencyMs, checkedAt: c.checkedAt }));
+  // maintenanceId rides along so the sparkline can draw a planned outage as
+  // planned rather than as a wall of failures.
+  const history = checks.map((c) => ({
+    ok: c.ok,
+    latencyMs: c.latencyMs,
+    checkedAt: c.checkedAt,
+    maintenanceId: c.maintenanceId,
+  }));
   // checks are oldest-first, so the last one is the most recent overall.
   const newestCheckAt = checks.length > 0 ? checks[checks.length - 1]!.checkedAt : null;
 
@@ -121,9 +156,16 @@ function describe(monitor: Monitor, ctx: StatusContext) {
   const blockedById = state?.suppressedBy ?? null;
   const [day, week, month] = ctx.uptimeByMonitor.get(monitor.id) ?? [];
 
+  // Read from the context, not from the scheduler's state, so a window that
+  // was created a second ago is reflected on this poll rather than after the
+  // monitor's next tick -- which on a 5-minute interval is a long time to sit
+  // watching a card that still says "down".
+  const maintenance = monitor.paused ? null : (ctx.maintenanceByMonitor.get(monitor.id) ?? null);
+
   return {
     ...redact(monitor),
-    status: monitor.paused ? 'paused' : (state?.status ?? 'pending'),
+    status: monitor.paused ? 'paused' : maintenance ? 'maintenance' : (state?.status ?? 'pending'),
+    maintenance,
     parentName: parent?.name ?? null,
     // Named so the dashboard can say what a monitor is waiting on rather than
     // just showing it greyed out for no visible reason.
@@ -333,6 +375,7 @@ export async function buildServer() {
       historyByMonitor: store.recentChecksAll(40),
       uptimeByMonitor: store.uptimeSinceAll([now - DAY, now - 7 * DAY, now - 30 * DAY]),
       dependentCountByMonitor: store.descendantCountMap(monitors),
+      maintenanceByMonitor: openWindowsByMonitor(now),
     };
 
     return {
@@ -406,6 +449,49 @@ export async function buildServer() {
       return store.recentChecks(id, clampLimit(req.query.limit, 200, 1000));
     },
   );
+
+  // ----------------------------------------------------------- maintenance
+
+  app.get('/api/maintenance', async () => store.listMaintenance());
+
+  app.get<{ Params: { id: string } }>('/api/maintenance/:id', async (req, reply) => {
+    const id = parseId(req.params.id);
+    if (id === null) return reply.code(400).send({ error: 'Invalid maintenance id' });
+    const window = store.getMaintenance(id);
+    if (!window) return reply.code(404).send({ error: 'Maintenance window not found' });
+    return window;
+  });
+
+  app.post('/api/maintenance', async (req, reply) => {
+    const input = validateMaintenance(req.body, { partial: false, graph: GRAPH });
+    const window = store.createMaintenance(input);
+    // A window that is already open has to take effect now, not at the next
+    // tick of every monitor it covers.
+    scheduler.sync();
+    return reply.code(201).send(window);
+  });
+
+  app.patch<{ Params: { id: string } }>('/api/maintenance/:id', async (req, reply) => {
+    const id = parseId(req.params.id);
+    if (id === null) return reply.code(400).send({ error: 'Invalid maintenance id' });
+    const existing = store.getMaintenance(id);
+    if (!existing) return reply.code(404).send({ error: 'Maintenance window not found' });
+    // The validator merges the patch onto the stored window and returns a
+    // whole one: the schedule fields are a union, so there is no valid half.
+    const input = validateMaintenance(req.body, { partial: true, current: existing, graph: GRAPH });
+    const window = store.updateMaintenance(id, input);
+    scheduler.sync();
+    return window;
+  });
+
+  app.delete<{ Params: { id: string } }>('/api/maintenance/:id', async (req, reply) => {
+    const id = parseId(req.params.id);
+    if (id === null) return reply.code(400).send({ error: 'Invalid maintenance id' });
+    const removed = store.deleteMaintenance(id);
+    if (!removed) return reply.code(404).send({ error: 'Maintenance window not found' });
+    scheduler.sync();
+    return reply.code(204).send();
+  });
 
   // ------------------------------------------------------------- incidents
 

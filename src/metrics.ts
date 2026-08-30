@@ -1,6 +1,7 @@
 import * as store from './db.ts';
 import { VERSION } from './config.ts';
 import { scheduler } from './scheduler.ts';
+import { openRule } from './maintenance.ts';
 import type { Incident, MonitorStatus } from './types.ts';
 
 const DAY = 86_400_000;
@@ -13,13 +14,13 @@ const WINDOWS: readonly [label: string, spanMs: number][] = [
 ];
 
 /**
- * Every state a monitor can be in. All five are emitted for every monitor, one
+ * Every state a monitor can be in. All six are emitted for every monitor, one
  * set to 1 and the rest to 0, rather than emitting only the current one --
  * otherwise `sentinel_monitor_status{status="down"}` returns *nothing* while a
  * monitor is healthy instead of 0, which leaves holes in graphs and makes
  * `sum by (status)` disagree with the monitor count.
  */
-const STATUSES: readonly MonitorStatus[] = ['up', 'down', 'pending', 'suppressed', 'paused'];
+const STATUSES: readonly MonitorStatus[] = ['up', 'down', 'pending', 'suppressed', 'paused', 'maintenance'];
 
 /**
  * Escape a Prometheus label value. The exposition format gives meaning to the
@@ -56,10 +57,11 @@ interface Family {
  * The whole `/metrics` body. `now` is injectable so the rollup windows are
  * deterministic under test.
  *
- * Cost is three queries regardless of how many monitors exist: the monitor
- * list, every open incident, and one grouped rollup across all windows. This
- * runs on whatever interval Prometheus scrapes at, so per-monitor queries here
- * would be a permanent load on a Pi rather than a one-off.
+ * Cost is five queries regardless of how many monitors exist: the monitor
+ * list, every open incident, one grouped rollup across all windows, and two
+ * for the maintenance schedule. This runs on whatever interval Prometheus
+ * scrapes at, so per-monitor queries here would be a permanent load on a Pi
+ * rather than a one-off.
  */
 export function renderMetrics(now = Date.now()): string {
   const monitors = store.listMonitors();
@@ -73,6 +75,19 @@ export function renderMetrics(now = Date.now()): string {
   }
 
   const rollups = store.uptimeSinceAll(WINDOWS.map(([, span]) => now - span));
+
+  // Resolved once for the whole scrape rather than per monitor, for the same
+  // reason the rollups are: this is a hot path with a fixed query budget.
+  const maintenanceWindows = store.listMaintenance();
+  const openWindowByMonitor = new Map<number, { id: number; name: string }>();
+  for (const window of maintenanceWindows) {
+    if (!openRule([window], now)) continue;
+    for (const monitorId of window.monitorIds) {
+      if (!openWindowByMonitor.has(monitorId)) {
+        openWindowByMonitor.set(monitorId, { id: window.id, name: window.name });
+      }
+    }
+  }
 
   const families: Family[] = [];
   const add = (name: string, help: string, type: Family['type'], samples: string[]) =>
@@ -90,13 +105,24 @@ export function renderMetrics(now = Date.now()): string {
   const avgLatency: string[] = [];
   const info: string[] = [];
 
-  const counts: Record<string, number> = { up: 0, down: 0, pending: 0, suppressed: 0, paused: 0 };
+  const counts: Record<string, number> = {
+    up: 0, down: 0, pending: 0, suppressed: 0, paused: 0, maintenance: 0,
+  };
   /** Newest check across every monitor -- the "is the scheduler still working" signal. */
   let newestCheckAt: number | null = null;
 
   for (const m of monitors) {
     const state = scheduler.getState(m.id);
-    const current: MonitorStatus = m.paused ? 'paused' : (state?.status ?? 'pending');
+    // Mirrors /api/status: a window that just opened is reported on this
+    // scrape rather than after the monitor's next tick, so an alerting rule
+    // on sentinel_monitor_status{status="down"} stops firing when the
+    // operator says maintenance has started, not a check interval later.
+    const inMaintenance = !m.paused && openWindowByMonitor.has(m.id);
+    const current: MonitorStatus = m.paused
+      ? 'paused'
+      : inMaintenance
+        ? 'maintenance'
+        : (state?.status ?? 'pending');
     counts[current] = (counts[current] ?? 0) + 1;
 
     // The label fragment every per-monitor family reuses, with the name
@@ -184,6 +210,18 @@ export function renderMetrics(now = Date.now()): string {
     'gauge',
     [`sentinel_monitors_suppressed ${counts.suppressed}`],
   );
+  add(
+    'sentinel_monitors_maintenance',
+    'Monitors currently inside an open maintenance window. Their checks still run and are stored, but they cannot alert and do not count towards uptime.',
+    'gauge',
+    [`sentinel_monitors_maintenance ${counts.maintenance}`],
+  );
+  add('sentinel_maintenance_windows_total', 'Configured maintenance windows, active or not.', 'gauge', [
+    `sentinel_maintenance_windows_total ${maintenanceWindows.length}`,
+  ]);
+  add('sentinel_maintenance_windows_open', 'Maintenance windows that are open right now.', 'gauge', [
+    `sentinel_maintenance_windows_open ${maintenanceWindows.filter((w) => openRule([w], now)).length}`,
+  ]);
   add('sentinel_monitors_paused', 'Monitors that are paused.', 'gauge', [
     `sentinel_monitors_paused ${counts.paused}`,
   ]);

@@ -2,7 +2,8 @@ import { SAFE_HOST } from './checks/ping.ts';
 import { parseHostPort } from './checks/tcp.ts';
 import { OPERATORS, isOperator } from './checks/assert.ts';
 import { parsePath, PathError } from './checks/jsonpath.ts';
-import type { Monitor, MonitorInput, MonitorType } from './types.ts';
+import { isValidTimezone } from './maintenance.ts';
+import type { MaintenanceInput, MaintenanceWindow, Monitor, MonitorInput, MonitorType } from './types.ts';
 
 const TYPES: MonitorType[] = ['http', 'tcp', 'ping', 'json'];
 export const METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'];
@@ -17,6 +18,10 @@ export const LIMITS = {
   retries: { min: 1, max: 20 },
   alertAfterS: { min: 0, max: 86_400 },
   reminderEveryS: { min: 0, max: 604_800 },
+  // A weekly window is resolved against at most three candidate local days, so
+  // it cannot correctly describe a span longer than one. Anything longer wants
+  // a 'once' window with real start and end instants anyway.
+  maintenanceDurationS: { min: 60, max: 86_400 },
 } as const;
 
 export class ValidationError extends Error {}
@@ -247,4 +252,133 @@ export function validateMonitor(input: unknown, { partial, current, graph }: Val
   }
 
   return out as Partial<MonitorInput>;
+}
+
+// ----------------------------------------------------------- maintenance
+
+const STRATEGIES = ['once', 'weekly'] as const;
+
+/** Every bit of the weekday mask set: Sunday through Saturday. */
+const ALL_WEEKDAYS = 0b1111111;
+
+export interface ValidateMaintenanceOptions {
+  partial: boolean;
+  /** The stored window on PATCH, so a partial body still yields a whole shape. */
+  current?: MaintenanceWindow;
+  /** Monitor existence, injected exactly as it is for validateMonitor. */
+  graph?: { exists(id: number): boolean };
+}
+
+/**
+ * Validate a maintenance window, returning the complete shape to store.
+ *
+ * Unlike `validateMonitor`, a partial body is merged onto `current` and a
+ * *whole* window comes back rather than a patch. The schedule fields are a
+ * discriminated union, so there is no such thing as a valid half: a PATCH that
+ * switches strategy to 'weekly' has to arrive with the weekly fields, or
+ * inherit a full set from a window that already had them.
+ */
+export function validateMaintenance(
+  input: unknown,
+  { partial, current, graph }: ValidateMaintenanceOptions,
+): MaintenanceInput {
+  if (typeof input !== 'object' || input === null) throw new ValidationError('Body must be an object');
+  const raw = input as Record<string, unknown>;
+  const has = (k: string) => k in raw && raw[k] !== undefined;
+
+  if (partial && !current) throw new ValidationError('Cannot patch a window that does not exist');
+
+  let name: string;
+  if (has('name')) {
+    name = String(raw.name).trim();
+    if (!name) throw new ValidationError('name is required');
+    if (name.length > 120) throw new ValidationError('name must be 120 characters or fewer');
+  } else if (current) {
+    name = current.name;
+  } else {
+    throw new ValidationError('name is required');
+  }
+
+  let timezone: string;
+  if (has('timezone')) {
+    timezone = raw.timezone === null ? '' : String(raw.timezone).trim();
+    // Rejected rather than silently falling back to the host zone: a typo like
+    // "Europe/Londin" would otherwise put a window hours away from where the
+    // operator meant it, and nothing would ever say so.
+    if (!isValidTimezone(timezone)) {
+      throw new ValidationError(`timezone "${timezone}" is not a zone this system knows`);
+    }
+  } else {
+    timezone = current?.timezone ?? '';
+  }
+
+  let active: boolean;
+  if (has('active')) {
+    if (typeof raw.active !== 'boolean') throw new ValidationError('active must be a boolean');
+    active = raw.active;
+  } else {
+    active = current?.active ?? true;
+  }
+
+  let monitorIds: number[];
+  if (has('monitorIds')) {
+    if (!Array.isArray(raw.monitorIds)) throw new ValidationError('monitorIds must be an array');
+    const seen = new Set<number>();
+    for (const entry of raw.monitorIds) {
+      const id = num(entry, 'monitorIds', 1, Number.MAX_SAFE_INTEGER);
+      if (graph && !graph.exists(id)) throw new ValidationError(`No monitor with id ${id} to put in maintenance`);
+      seen.add(id);
+    }
+    monitorIds = [...seen];
+  } else {
+    monitorIds = current?.monitorIds ?? [];
+  }
+
+  let strategy: (typeof STRATEGIES)[number];
+  if (has('strategy')) {
+    const value = String(raw.strategy);
+    if (!STRATEGIES.includes(value as (typeof STRATEGIES)[number])) {
+      throw new ValidationError(`strategy must be one of ${STRATEGIES.join(', ')}`);
+    }
+    strategy = value as (typeof STRATEGIES)[number];
+  } else if (current) {
+    strategy = current.strategy;
+  } else {
+    throw new ValidationError('strategy is required');
+  }
+
+  const common = { name, timezone, active, monitorIds };
+
+  // Inherited defaults only apply when the stored window is the same strategy.
+  // Switching a 'once' window to 'weekly' has nothing to inherit, so the
+  // weekly fields become required again -- which is the point of the union.
+  if (strategy === 'once') {
+    const inherited = current?.strategy === 'once' ? current : undefined;
+    const startsAt = has('startsAt')
+      ? num(raw.startsAt, 'startsAt', 1, Number.MAX_SAFE_INTEGER)
+      : inherited?.startsAt;
+    const endsAt = has('endsAt') ? num(raw.endsAt, 'endsAt', 1, Number.MAX_SAFE_INTEGER) : inherited?.endsAt;
+
+    if (startsAt === undefined) throw new ValidationError('startsAt is required for a one-off window');
+    if (endsAt === undefined) throw new ValidationError('endsAt is required for a one-off window');
+    if (endsAt <= startsAt) throw new ValidationError('endsAt must be after startsAt');
+
+    return { ...common, strategy: 'once', startsAt, endsAt };
+  }
+
+  const inherited = current?.strategy === 'weekly' ? current : undefined;
+  const startMin = has('startMin') ? num(raw.startMin, 'startMin', 0, 1439) : inherited?.startMin;
+  const durationS = has('durationS')
+    ? num(raw.durationS, 'durationS', LIMITS.maintenanceDurationS.min, LIMITS.maintenanceDurationS.max)
+    : inherited?.durationS;
+  const weekdays = has('weekdays') ? num(raw.weekdays, 'weekdays', 1, ALL_WEEKDAYS) : inherited?.weekdays;
+
+  if (startMin === undefined) throw new ValidationError('startMin is required for a weekly window');
+  if (durationS === undefined) throw new ValidationError('durationS is required for a weekly window');
+  // Zero is excluded by the range above rather than here: a mask with no days
+  // set would be a window that never opens, which is what `active: false` is
+  // for and is almost certainly not what was meant.
+  if (weekdays === undefined) throw new ValidationError('weekdays is required for a weekly window');
+
+  return { ...common, strategy: 'weekly', startMin, durationS, weekdays };
 }

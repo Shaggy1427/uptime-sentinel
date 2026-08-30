@@ -36,6 +36,7 @@ Delivered and in `main`:
 | Config export and import | Merge by name, `dryRun` preview, credentials withheld unless asked for |
 | Seeding | First-run import from `monitors.json` or `MONITORS_FILE`, in either file format |
 | Three deployment paths | Docker Compose, a hardened systemd unit with an idempotent installer, and a raw Node process |
+| Maintenance windows | One-off and weekly, per monitor; checks still run and are stored, tagged, but cannot alert or count towards uptime |
 | Retention | Check rows pruned on a schedule, with `VACUUM` gated on the freelist being worth the rewrite |
 | CI | Typecheck, tests, production audit, ShellCheck, `systemd-analyze verify`, multi-arch Docker build, CodeQL `security-extended` |
 
@@ -122,7 +123,9 @@ New capability that fits the current architecture.
 - [ ] **Quiet hours.** Suppress non-urgent alerts overnight and still queue a
       summary for the morning. The state machine already distinguishes "down"
       from "alerted", so the hook is a check before `dispatch` plus somewhere to
-      hold the deferred summary.
+      hold the deferred summary. `src/suppression.ts` now holds the reason
+      union both existing gates flow through: adding `'quiet-hours'` to
+      `SUPPRESSION_REASONS` with its own policy is most of the wiring.
 
 ### Monitoring
 
@@ -137,10 +140,11 @@ New capability that fits the current architecture.
       data is already stored and already aggregated by `uptimeSinceAll`; the
       work is a threshold field, a state in the machine that is not "down", and
       a notification kind that does not read as an outage.
-- [ ] **Maintenance windows.** Schedule expected downtime so it neither alerts
-      nor counts against uptime. Distinct from pausing, which is indefinite and
-      manual. Needs a table, a scheduler check before dispatch, and exclusion
-      from the uptime aggregates.
+- [x] **Maintenance windows.** Done. One-off and weekly windows, assigned to
+      monitors many-to-many. Checks still run inside a window and are stored
+      tagged with it, so the latency history survives while the uptime
+      aggregates exclude them. Adds a `maintenance` monitor status. Cron was
+      deliberately left out.
 
 ### Product
 
