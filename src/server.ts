@@ -251,14 +251,23 @@ export async function buildServer() {
 
   app.get('/api/health', async () => {
     const monitors = store.listMonitors();
-    const down = monitors.filter((m) => !m.paused && scheduler.getState(m.id)?.status === 'down');
-    const suppressed = monitors.filter((m) => !m.paused && scheduler.getState(m.id)?.status === 'suppressed');
+    // One pass: each monitor is looked up once, paused ones are skipped
+    // without a state lookup, and we count down/suppressed as we go instead
+    // of allocating two intermediate arrays the way two .filter() calls would.
+    let down = 0;
+    let suppressed = 0;
+    for (const m of monitors) {
+      if (m.paused) continue;
+      const status = scheduler.getState(m.id)?.status;
+      if (status === 'down') down++;
+      else if (status === 'suppressed') suppressed++;
+    }
     return {
       ok: true,
       version: VERSION,
       monitors: monitors.length,
-      down: down.length,
-      suppressed: suppressed.length,
+      down,
+      suppressed,
       uptimeS: Math.round(process.uptime()),
     };
   });
@@ -405,7 +414,7 @@ export async function buildServer() {
       monitorId = parsed;
     }
     const incidents = store.listIncidents(limit, monitorId);
-    const names = new Map(store.listMonitors().map((m) => [m.id, m.name]));
+    const names = store.monitorNameMap();
     return incidents.map((i) => ({ ...i, monitorName: names.get(i.monitorId) ?? 'deleted monitor' }));
   });
 
@@ -416,6 +425,10 @@ export async function buildServer() {
     const wantId =
       typeof monitorId === 'number' && Number.isSafeInteger(monitorId) && monitorId > 0 ? monitorId : null;
     const monitor = wantId !== null ? store.getMonitor(wantId) : store.listMonitors()[0];
+    // An explicitly requested monitor must exist. Falling through to the
+    // placeholder would send a 200 test alert for a monitor that does not,
+    // leaving the operator to believe they verified the wrong thing.
+    if (wantId !== null && !monitor) return reply.code(404).send({ error: 'Monitor not found' });
     const subject: Monitor = monitor ?? {
       id: 0,
       name: 'uptime-sentinel',
