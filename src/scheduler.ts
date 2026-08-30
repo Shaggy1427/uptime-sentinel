@@ -61,6 +61,14 @@ export class Scheduler {
   private timers = new Map<number, NodeJS.Timeout>();
   private pruneTimer: NodeJS.Timeout | null = null;
   private running = false;
+  /**
+   * Monitor-derived health stats, recomputed by sync() from the list it
+   * already holds. sync() runs after every CRUD, so this is current at the
+   * only moments the monitor set can change; health() then serves heartbeat
+   * ticks without a fresh query. Null until the first sync, in which case
+   * health() falls back to computing it (tests drive monitors directly).
+   */
+  private monitorStats: { activeMonitors: number; slowestIntervalS: number } | null = null;
 
   start(): void {
     this.running = true;
@@ -167,6 +175,18 @@ export class Scheduler {
       if (state.status === 'paused') state.status = 'pending';
       if (this.running && !this.timers.has(monitor.id)) this.schedule(monitor, this.startupJitter(monitor));
     }
+
+    // The heartbeat reads health() on every tick; the parts of it that come
+    // from the monitor list only change here, so fold the computation into
+    // the walk sync() was already doing.
+    let slowestIntervalS = 0;
+    let activeMonitors = 0;
+    for (const monitor of monitors) {
+      if (monitor.paused) continue;
+      activeMonitors++;
+      if (monitor.intervalS > slowestIntervalS) slowestIntervalS = monitor.intervalS;
+    }
+    this.monitorStats = { activeMonitors, slowestIntervalS: slowestIntervalS || 60 };
   }
 
   /** Spread first checks out so 20 monitors don't all fire in the same tick. */
@@ -483,7 +503,12 @@ export class Scheduler {
    * scheduler has stalled is still broken.
    */
   health(): { activeMonitors: number; lastCheckAt: number | null; slowestIntervalS: number } {
-    const active = listMonitors().filter((m) => !m.paused);
+    // monitorStats is refreshed by sync(), which runs after every CRUD, so
+    // the cached values are current whenever the monitor set has changed.
+    // The fallback covers callers that never went through sync (tests that
+    // create monitors directly).
+    const { activeMonitors, slowestIntervalS } =
+      this.monitorStats ?? this.computeMonitorStats();
 
     let lastCheckAt: number | null = null;
     for (const state of this.states.values()) {
@@ -491,8 +516,18 @@ export class Scheduler {
       if (lastCheckAt === null || state.lastCheckedAt > lastCheckAt) lastCheckAt = state.lastCheckedAt;
     }
 
-    const slowestIntervalS = active.reduce((max, m) => Math.max(max, m.intervalS), 0) || 60;
-    return { activeMonitors: active.length, lastCheckAt, slowestIntervalS };
+    return { activeMonitors, lastCheckAt, slowestIntervalS };
+  }
+
+  private computeMonitorStats(): { activeMonitors: number; slowestIntervalS: number } {
+    let slowestIntervalS = 0;
+    let activeMonitors = 0;
+    for (const m of listMonitors()) {
+      if (m.paused) continue;
+      activeMonitors++;
+      if (m.intervalS > slowestIntervalS) slowestIntervalS = m.intervalS;
+    }
+    return { activeMonitors, slowestIntervalS: slowestIntervalS || 60 };
   }
 
   getState(monitorId: number): RuntimeState | null {
