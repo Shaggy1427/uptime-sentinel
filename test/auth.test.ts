@@ -52,6 +52,35 @@ test('password and bearer token grant access', async () => {
   assert.equal(withBearer.statusCode, 200);
 });
 
+test('session cookie Secure flag tracks the actual request protocol, not PUBLIC_URL', async () => {
+  // PUBLIC_URL stays at its http://... default from .env.example, so the old
+  // behaviour would have omitted Secure even when the request was HTTPS (a
+  // downgrade). The cookie must now follow req.protocol so a TLS-terminating
+  // reverse proxy that forgets to set PUBLIC_URL still pins the cookie.
+  const proxied = await buildServer({ trustProxy: true });
+  await proxied.ready();
+  try {
+    const res = await proxied.inject({
+      method: 'POST',
+      url: '/api/login',
+      headers: { 'x-forwarded-proto': 'https' },
+      payload: { password: 'hunter2' },
+    });
+    assert.equal(res.statusCode, 200);
+    assert.match(String(res.headers['set-cookie']), /;\s*Secure/i, 'Secure flag must follow req.protocol');
+
+    const plain = await proxied.inject({
+      method: 'POST',
+      url: '/api/login',
+      payload: { password: 'hunter2' },
+    });
+    assert.equal(plain.statusCode, 200);
+    assert.doesNotMatch(String(plain.headers['set-cookie']), /;\s*Secure/i, 'plain HTTP must not set Secure');
+  } finally {
+    await proxied.close();
+  }
+});
+
 test('/metrics is guarded and accepts the bearer token', async () => {
   const denied = await app.inject({ method: 'GET', url: '/metrics' });
   assert.equal(denied.statusCode, 401);
