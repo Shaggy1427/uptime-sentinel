@@ -8,6 +8,9 @@ import path from 'node:path';
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sentinel-json-'));
 process.env.DATA_DIR = tmp;
 process.env.NTFY_TOPIC = '';
+// Tests use LAN-style targets to exercise the rest of the API; SSRF guard
+// is verified in its own test file with the guard enabled.
+process.env.BLOCK_PRIVATE_TARGETS = 'false';
 
 import { readPath, parsePath, PathError } from '../src/checks/jsonpath.ts';
 import { assertValues } from '../src/checks/assert.ts';

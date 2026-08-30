@@ -8,6 +8,9 @@ import path from 'node:path';
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sentinel-redir-'));
 process.env.DATA_DIR = tmp;
 process.env.NTFY_TOPIC = '';
+// Tests use LAN-style targets to exercise the rest of the API; SSRF guard
+// is verified in its own test file with the guard enabled.
+process.env.BLOCK_PRIVATE_TARGETS = 'false';
 
 const { httpCheck } = await import('../src/checks/http.ts');
 const { jsonCheck } = await import('../src/checks/json.ts');

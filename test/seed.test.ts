@@ -7,6 +7,9 @@ import path from 'node:path';
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sentinel-seed-'));
 process.env.DATA_DIR = tmp;
 process.env.NTFY_TOPIC = '';
+// Tests use LAN-style targets to exercise the rest of the API; SSRF guard
+// is verified in its own test file with the guard enabled.
+process.env.BLOCK_PRIVATE_TARGETS = 'false';
 
 const store = await import('../src/db.ts');
 const { seedIfEmpty } = await import('../src/seed.ts');
