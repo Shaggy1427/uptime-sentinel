@@ -35,7 +35,9 @@ good next issues. Each entry notes the files you would touch.
 - [ ] **Public status page** — a read-only view at `/status` that needs no auth.
 - [ ] **Maintenance windows** — schedule expected downtime so it does not alert or
       count against uptime.
-- [ ] **Prometheus `/metrics` endpoint** — so Grafana can chart it.
+- [x] **Prometheus `/metrics` endpoint** — done. Prometheus text format at
+      `/metrics`, behind the API auth when `AUTH_PASSWORD` is set. Rendering
+      lives in `src/metrics.ts`.
 - [ ] **Response-time alerting** — alert on "slow" as well as "down".
 - [ ] **Multi-user / API tokens** — the current auth is a single shared password.
 

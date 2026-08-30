@@ -160,3 +160,30 @@ test('deleting a monitor while its check is in flight does not break anything', 
   assert.equal(check.statusCode, 200);
   assert.equal(check.json().ok, false);
 });
+
+test('/api/status resolves parent name and dependent count from one monitor list', async () => {
+  const parent = (
+    await app.inject({
+      method: 'POST',
+      url: '/api/monitors',
+      payload: { name: 'Router', type: 'tcp', target: '127.0.0.1:9', intervalS: 3600 },
+    })
+  ).json();
+  for (const name of ['Child A', 'Child B']) {
+    await app.inject({
+      method: 'POST',
+      url: '/api/monitors',
+      payload: { name, type: 'tcp', target: '127.0.0.1:9', intervalS: 3600, parentId: parent.id },
+    });
+  }
+
+  const status = (await app.inject({ method: 'GET', url: '/api/status' })).json();
+  const byName = new Map(status.monitors.map((m: { name: string }) => [m.name, m]));
+
+  assert.equal(byName.get('Router').dependentCount, 2);
+  assert.equal(byName.get('Router').parentName, null);
+  assert.equal(byName.get('Child A').parentName, 'Router');
+  assert.equal(byName.get('Child B').dependentCount, 0);
+
+  for (const m of status.monitors) await app.inject({ method: 'DELETE', url: `/api/monitors/${m.id}` });
+});
