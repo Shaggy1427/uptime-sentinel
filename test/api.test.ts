@@ -74,6 +74,19 @@ test('test-notification fails loudly when no channel is configured', async () =>
   assert.match(res.json().error, /NTFY_TOPIC/);
 });
 
+test('test-notification refuses an unknown monitorId instead of testing a placeholder', async () => {
+  // The placeholder subject (name "uptime-sentinel", target localhost) exists
+  // for the no-argument "test the wiring" case. An explicit monitorId that
+  // matches nothing used to fall through to it and return 200.
+  const res = await app.inject({
+    method: 'POST',
+    url: '/api/test-notification',
+    payload: { monitorId: 999999 },
+  });
+  assert.equal(res.statusCode, 404);
+  assert.match(res.json().error, /not found/i);
+});
+
 test('manual checks are refused for paused monitors', async () => {
   const created = await app.inject({
     method: 'POST',
