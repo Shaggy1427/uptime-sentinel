@@ -59,6 +59,12 @@ button.danger:hover { border-color: var(--down); color: var(--down); }
   background: color-mix(in srgb, var(--down) 12%, transparent);
   border: 1px solid color-mix(in srgb, var(--down) 40%, transparent);
 }
+/* Shown when a poll fails, so stale data is never mistaken for current data. */
+.stale-warning {
+  color: var(--pending); font-size: .78rem; border-radius: 20px; padding: .1rem .55rem;
+  background: color-mix(in srgb, var(--pending) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--pending) 40%, transparent);
+}
 .actions { margin-left: auto; display: flex; gap: .5rem; }
 
 main { max-width: 1280px; margin: 0 auto; padding: 1.25rem; }

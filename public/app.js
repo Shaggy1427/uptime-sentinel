@@ -56,93 +56,136 @@ function banner(message, kind) {
   if (kind === 'ok') setTimeout(() => node.classList.add('hidden'), 4000);
 }
 
-// ------------------------------------------------------------------- render
+// Cards are updated in place rather than rebuilt, so every write is guarded by
+// a comparison: touching a node that has not changed would restart its CSS
+// transition and, for some properties, cost a needless layout.
 
-function sparkline(history) {
-  const wrap = el('div', 'spark');
-  const slots = 40;
-  const padded = Array(Math.max(0, slots - history.length)).fill(null).concat(history.slice(-slots));
-  const latencies = history.filter((h) => h.ok && h.latencyMs != null).map((h) => h.latencyMs);
-  const max = Math.max(1, ...latencies);
-
-  for (const point of padded) {
-    const bar = el('i');
-    if (!point) {
-      bar.className = 'empty';
-    } else if (!point.ok) {
-      bar.className = 'bad';
-      bar.style.height = '100%';
-      bar.title = 'Failed check';
-    } else {
-      const height = Math.max(12, Math.round(((point.latencyMs ?? 0) / max) * 100));
-      bar.style.height = `${height}%`;
-      bar.title = `${point.latencyMs ?? '?'}ms - ${new Date(point.checkedAt).toLocaleTimeString()}`;
-    }
-    wrap.append(bar);
-  }
-  return wrap;
+function setText(node, text) {
+  if (node.textContent !== text) node.textContent = text;
 }
 
-function monitorCard(m) {
-  const card = el('article', `card monitor ${m.status}`);
+function setClass(node, className) {
+  if (node.className !== className) node.className = className;
+}
 
+function setTitle(node, title) {
+  if (node.title !== title) node.title = title;
+}
+
+function setHeight(node, height) {
+  if (node.style.height !== height) node.style.height = height;
+}
+
+function setShown(node, shown) {
+  node.classList.toggle('hidden', !shown);
+}
+
+// ------------------------------------------------------------------- render
+
+const SPARK_SLOTS = 40;
+
+/** A fixed row of bars, reused across refreshes so the height transition runs. */
+function sparkline() {
+  const wrap = el('div', 'spark');
+  const bars = [];
+  for (let i = 0; i < SPARK_SLOTS; i++) {
+    const bar = el('i');
+    bars.push(bar);
+    wrap.append(bar);
+  }
+
+  function update(history) {
+    const padded = Array(Math.max(0, SPARK_SLOTS - history.length))
+      .fill(null)
+      .concat(history.slice(-SPARK_SLOTS));
+    const latencies = history.filter((h) => h.ok && h.latencyMs != null).map((h) => h.latencyMs);
+    const max = Math.max(1, ...latencies);
+
+    padded.forEach((point, i) => {
+      const bar = bars[i];
+      if (!point) {
+        setClass(bar, 'empty');
+        setHeight(bar, '');
+        setTitle(bar, '');
+      } else if (!point.ok) {
+        setClass(bar, 'bad');
+        setHeight(bar, '100%');
+        setTitle(bar, 'Failed check');
+      } else {
+        setClass(bar, '');
+        setHeight(bar, `${Math.max(12, Math.round(((point.latencyMs ?? 0) / max) * 100))}%`);
+        setTitle(bar, `${point.latencyMs ?? '?'}ms - ${new Date(point.checkedAt).toLocaleTimeString()}`);
+      }
+    });
+  }
+
+  return { node: wrap, update };
+}
+
+/**
+ * One monitor card, built once and updated in place.
+ *
+ * The card outlives every refresh, which is the whole point: rebuilding it
+ * would throw away keyboard focus, the text the user is halfway through
+ * selecting, and the state of a button whose request has not come back yet.
+ */
+function monitorCard(monitor) {
+  // Handlers read this rather than closing over the monitor they were built
+  // with, so a click always acts on the freshest data. Closing over `monitor`
+  // would leave Edit opening a stale copy.
+  let current = monitor;
+
+  const card = el('article');
   const head = el('div', 'm-head');
-  head.append(el('span', 'dot'), el('span', 'm-name', m.name), el('span', 'm-type', m.type));
-  card.append(head, el('div', 'm-target', m.target));
+  const name = el('span', 'm-name');
+  const type = el('span', 'm-type');
+  head.append(el('span', 'dot'), name, type);
 
-  if (m.status === 'suppressed') {
-    card.append(el('div', 'm-waiting', `Not checked — waiting on ${m.suppressedBy ?? 'a dependency'}`));
-  }
+  const target = el('div', 'm-target');
+  const waiting = el('div', 'm-waiting');
+  const error = el('div', 'm-error');
+  const deps = el('div', 'm-deps');
+  const spark = sparkline();
 
-  if (m.status === 'down' && m.lastResult?.error) {
-    const err = el('div', 'm-error', m.lastResult.error);
-    if (m.downSinceMs != null) err.textContent += ` - down ${duration(m.downSinceMs)}`;
-    card.append(err);
-  }
-
-  if (m.dependentCount > 0) {
-    card.append(el('div', 'm-deps', `${m.dependentCount} monitor${m.dependentCount === 1 ? '' : 's'} depend on this`));
-  }
-
-  card.append(sparkline(m.history));
-
+  // Built once and toggled, rather than added and removed, so the card's
+  // children never shuffle underneath the user.
   const stats = el('div', 'm-stats');
-  const stat = (label, value) => {
-    const s = el('span', null, `${label} `);
-    s.append(el('b', null, value));
-    return s;
+  const stat = (label) => {
+    const wrap = el('span', null, `${label} `);
+    const value = el('b');
+    wrap.append(value);
+    stats.append(wrap);
+    return value;
   };
-  stats.append(
-    stat('24h', pct(m.uptime.day.ratio)),
-    stat('30d', pct(m.uptime.month.ratio)),
-    stat('latency', m.uptime.day.avgLatencyMs != null ? `${m.uptime.day.avgLatencyMs}ms` : '--'),
-    stat('checked', ago(m.lastCheckedAt)),
-  );
-  card.append(stats);
+  const dayStat = stat('24h');
+  const monthStat = stat('30d');
+  const latencyStat = stat('latency');
+  const checkedStat = stat('checked');
 
   const actions = el('div', 'm-actions');
-  if (!m.paused) {
-    // Paused monitors are inert; the server refuses manual checks for them.
-    const check = el('button', 'tiny ghost', 'Check now');
-    check.onclick = async () => {
-      check.disabled = true;
-      check.textContent = 'Checking...';
-      try {
-        await api(`/api/monitors/${m.id}/check`, { method: 'POST' });
-        await refresh();
-      } catch (err) {
-        banner(err.message, 'err');
-        check.disabled = false;
-        check.textContent = 'Check now';
-      }
-    };
-    actions.append(check);
-  }
 
-  const pause = el('button', 'tiny ghost', m.paused ? 'Resume' : 'Pause');
+  // Paused monitors are inert; the server refuses manual checks for them.
+  const check = el('button', 'tiny ghost', 'Check now');
+  check.onclick = async () => {
+    check.disabled = true;
+    setText(check, 'Checking...');
+    try {
+      await api(`/api/monitors/${current.id}/check`, { method: 'POST' });
+      await refresh();
+    } catch (err) {
+      banner(err.message, 'err');
+    } finally {
+      // The card is no longer replaced on refresh, so the button has to put
+      // itself back -- and it must do so after the refresh above has run.
+      check.disabled = false;
+      setText(check, 'Check now');
+    }
+  };
+
+  const pause = el('button', 'tiny ghost');
   pause.onclick = async () => {
     try {
-      await api(`/api/monitors/${m.id}`, { method: 'PATCH', body: JSON.stringify({ paused: !m.paused }) });
+      await api(`/api/monitors/${current.id}`, { method: 'PATCH', body: JSON.stringify({ paused: !current.paused }) });
       await refresh();
     } catch (err) {
       banner(err.message, 'err');
@@ -150,36 +193,149 @@ function monitorCard(m) {
   };
 
   const edit = el('button', 'tiny ghost', 'Edit');
-  edit.onclick = () => openEditor(m);
+  edit.onclick = () => openEditor(current);
 
   const remove = el('button', 'tiny ghost danger', 'Delete');
   remove.onclick = async () => {
-    if (!confirm(`Delete "${m.name}"? Its history and incidents go too.`)) return;
+    if (!confirm(`Delete "${current.name}"? Its history and incidents go too.`)) return;
     try {
-      await api(`/api/monitors/${m.id}`, { method: 'DELETE' });
+      await api(`/api/monitors/${current.id}`, { method: 'DELETE' });
       await refresh();
     } catch (err) {
       banner(err.message, 'err');
     }
   };
 
-  actions.append(pause, el('span', 'spacer'), edit, remove);
-  card.append(actions);
-  return card;
+  actions.append(check, pause, el('span', 'spacer'), edit, remove);
+  card.append(head, target, waiting, error, deps, spark.node, stats, actions);
+
+  function update(next) {
+    current = next;
+
+    setClass(card, `card monitor ${next.status}`);
+    setText(name, next.name);
+    setText(type, next.type);
+    setText(target, next.target);
+
+    const suppressed = next.status === 'suppressed';
+    setShown(waiting, suppressed);
+    if (suppressed) setText(waiting, `Not checked — waiting on ${next.suppressedBy ?? 'a dependency'}`);
+
+    const failing = next.status === 'down' && !!next.lastResult?.error;
+    setShown(error, failing);
+    if (failing) {
+      const since = next.downSinceMs != null ? ` - down ${duration(next.downSinceMs)}` : '';
+      setText(error, `${next.lastResult.error}${since}`);
+    }
+
+    setShown(deps, next.dependentCount > 0);
+    if (next.dependentCount > 0) {
+      setText(deps, `${next.dependentCount} monitor${next.dependentCount === 1 ? '' : 's'} depend on this`);
+    }
+
+    spark.update(next.history);
+
+    setText(dayStat, pct(next.uptime.day.ratio));
+    setText(monthStat, pct(next.uptime.month.ratio));
+    setText(latencyStat, next.uptime.day.avgLatencyMs != null ? `${next.uptime.day.avgLatencyMs}ms` : '--');
+    setText(checkedStat, ago(next.lastCheckedAt));
+
+    setShown(check, !next.paused);
+    // A check that is mid-request owns its own label until the request
+    // settles; a refresh landing in that window must not stomp it.
+    if (!check.disabled) setText(check, 'Check now');
+    setText(pause, next.paused ? 'Resume' : 'Pause');
+  }
+
+  update(monitor);
+  return { node: card, update };
 }
 
 let lastMonitors = [];
 
+/** Live cards by monitor id, so a refresh can update rather than rebuild. */
+const cards = new Map();
+
+/**
+ * Put `desired` into `host` in that order, doing nothing if it is already so.
+ *
+ * Order only changes when a monitor changes status, so in the steady state this
+ * performs no DOM moves at all -- which is what keeps focus and selection
+ * intact between refreshes.
+ */
+function reorder(host, desired) {
+  const current = [...host.children];
+  if (current.length === desired.length && desired.every((node, i) => current[i] === node)) return;
+
+  // Re-appending detaches each node first, which blurs whatever held focus and
+  // collapses any selection inside. The nodes are moved rather than rebuilt, so
+  // both references stay valid across the move and can simply be put back.
+  const active = document.activeElement;
+  const refocus = active && host.contains(active) ? active : null;
+  // Range objects are live: detaching a node collapses every range pointing
+  // into it, clones included. So the boundary points are copied out as plain
+  // values and a fresh range is built afterwards -- the nodes themselves are
+  // moved rather than rebuilt, so those references stay good.
+  const selection = window.getSelection();
+  const picked =
+    selection && selection.rangeCount > 0 && host.contains(selection.getRangeAt(0).commonAncestorContainer)
+      ? (({ startContainer, startOffset, endContainer, endOffset }) => ({
+          startContainer,
+          startOffset,
+          endContainer,
+          endOffset,
+        }))(selection.getRangeAt(0))
+      : null;
+
+  for (const node of desired) host.append(node);
+
+  if (refocus) refocus.focus();
+  if (picked) {
+    try {
+      const restored = document.createRange();
+      restored.setStart(picked.startContainer, picked.startOffset);
+      restored.setEnd(picked.endContainer, picked.endOffset);
+      selection.removeAllRanges();
+      selection.addRange(restored);
+    } catch {
+      // The selected text was re-rendered out from under us; not worth caring.
+    }
+  }
+}
+
 function renderMonitors(monitors) {
   const grid = $('#monitors');
-  grid.replaceChildren();
-  if (monitors.length === 0) {
-    grid.append(el('p', 'empty-state', 'No monitors yet. Click "Add monitor" to start watching something.'));
+  const rank = { down: 0, pending: 1, up: 2, suppressed: 3, paused: 4 };
+  // Sorted on a copy: `monitors` is the same array as the lastMonitors global,
+  // and rendering has no business reordering what the editor reads.
+  const ordered = [...monitors].sort((a, b) => rank[a.status] - rank[b.status] || a.name.localeCompare(b.name));
+
+  if (ordered.length === 0) {
+    cards.clear();
+    grid.replaceChildren(el('p', 'empty-state', 'No monitors yet. Click "Add monitor" to start watching something.'));
     return;
   }
-  const rank = { down: 0, pending: 1, up: 2, suppressed: 3, paused: 4 };
-  monitors.sort((a, b) => rank[a.status] - rank[b.status] || a.name.localeCompare(b.name));
-  for (const m of monitors) grid.append(monitorCard(m));
+
+  const live = new Set(ordered.map((m) => m.id));
+  for (const [id, card] of cards) {
+    if (live.has(id)) continue;
+    card.node.remove();
+    cards.delete(id);
+  }
+  grid.querySelector('.empty-state')?.remove();
+
+  for (const m of ordered) {
+    const existing = cards.get(m.id);
+    if (existing) {
+      existing.update(m);
+    } else {
+      const card = monitorCard(m);
+      cards.set(m.id, card);
+      grid.append(card.node);
+    }
+  }
+
+  reorder(grid, ordered.map((m) => cards.get(m.id).node));
 }
 
 function renderSummary(monitors, notificationsConfigured) {
@@ -530,19 +686,52 @@ function openImport() {
 
 // -------------------------------------------------------------------- boot
 
+/** When the last poll actually succeeded, and whether the current one did. */
+let lastSuccessAt = null;
+let reachable = true;
+
+/**
+ * Say so when the dashboard cannot reach the server.
+ *
+ * Silence here is the worst possible failure for a monitoring tool: without
+ * this the page keeps showing the last good data, all green, indefinitely --
+ * the only tell being a footer clock that quietly stopped advancing.
+ */
+function setReachable(ok) {
+  reachable = ok;
+  const node = $('#connection');
+  setShown(node, !ok);
+  if (!ok) {
+    setText(node, lastSuccessAt === null ? 'Cannot reach the server' : `Connection lost — data is ${ago(lastSuccessAt)}`);
+  }
+
+  const stamp = $('#refreshed');
+  if (lastSuccessAt === null) setText(stamp, ' ');
+  else if (ok) setText(stamp, `Updated ${new Date(lastSuccessAt).toLocaleTimeString()}`);
+  // While offline the absolute time is the misleading part: it looks current.
+  else setText(stamp, `Last updated ${ago(lastSuccessAt)}`);
+}
+
 async function refresh() {
   const [status, incidents] = await Promise.all([api('/api/status'), api('/api/incidents?limit=25')]);
   lastMonitors = status.monitors;
   renderSummary(status.monitors, status.notificationsConfigured);
   renderMonitors(status.monitors);
   renderIncidents(incidents);
-  $('#refreshed').textContent = `Updated ${new Date().toLocaleTimeString()}`;
+  lastSuccessAt = Date.now();
+  setReachable(true);
 }
 
 function start() {
   if (timer) clearInterval(timer);
-  refresh().catch((err) => banner(err.message, 'err'));
-  timer = setInterval(() => refresh().catch(() => {}), REFRESH_MS);
+  const tick = () =>
+    refresh().catch((err) => {
+      // A 401 is not a reachability problem; api() has already shown the login
+      // overlay and stopped the timer.
+      if (err.message !== 'Unauthorized') setReachable(false);
+    });
+  tick();
+  timer = setInterval(tick, REFRESH_MS);
 }
 
 $('#btn-add').onclick = () => openEditor(null);

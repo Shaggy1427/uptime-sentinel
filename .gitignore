@@ -4,6 +4,9 @@ dist/
 .env
 .env.local
 data/
+# The cookie signing key, wherever DATA_DIR happens to point. Only `data/` is
+# ignored above, so a run with DATA_DIR elsewhere could otherwise commit it.
+.cookie-secret
 *.db
 *.db-journal
 *.db-wal
