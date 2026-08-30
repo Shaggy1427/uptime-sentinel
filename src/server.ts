@@ -5,13 +5,14 @@ import type { FastifyError } from 'fastify';
 import fastifyStatic from '@fastify/static';
 import fastifyCookie from '@fastify/cookie';
 import fastifyRateLimit from '@fastify/rate-limit';
-import { config } from './config.ts';
+import { config, VERSION } from './config.ts';
 import * as store from './db.ts';
 import { scheduler } from './scheduler.ts';
 import { dispatch } from './notify/index.ts';
 import { validateMonitor, ValidationError } from './validate.ts';
 import type { ValidateOptions } from './validate.ts';
 import { cookieSecret, secretEquals } from './secret.ts';
+import { renderMetrics } from './metrics.ts';
 import type { Monitor } from './types.ts';
 
 const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
@@ -58,7 +59,13 @@ function parseId(value: string | undefined): number | null {
   return Number.isSafeInteger(n) && n > 0 ? n : null;
 }
 
-function describe(monitor: Monitor) {
+function describe(monitor: Monitor, all?: Monitor[]) {
+  // `all` lets /api/status resolve parent names and descendant counts against a
+  // single monitor list instead of one listMonitors() (a full table scan) per
+  // monitor -- otherwise describing N monitors is O(N^2) scans on every 10s poll.
+  const monitors = all ?? store.listMonitors();
+  const byId = new Map(monitors.map((m) => [m.id, m]));
+
   const state = scheduler.getState(monitor.id);
   const now = Date.now();
   const incident = monitor.paused ? null : store.openIncidentFor(monitor.id);
@@ -68,7 +75,7 @@ function describe(monitor: Monitor) {
     checkedAt: c.checkedAt,
   }));
 
-  const parent = monitor.parentId === null ? null : store.getMonitor(monitor.parentId);
+  const parent = monitor.parentId === null ? null : (byId.get(monitor.parentId) ?? null);
   const blockedById = state?.suppressedBy ?? null;
 
   return {
@@ -77,8 +84,8 @@ function describe(monitor: Monitor) {
     parentName: parent?.name ?? null,
     // Named so the dashboard can say what a monitor is waiting on rather than
     // just showing it greyed out for no visible reason.
-    suppressedBy: blockedById === null ? null : (store.getMonitor(blockedById)?.name ?? null),
-    dependentCount: store.descendantsOf(monitor.id).filter((m) => !m.paused).length,
+    suppressedBy: blockedById === null ? null : (byId.get(blockedById)?.name ?? null),
+    dependentCount: store.descendantsOf(monitor.id, monitors).filter((m) => !m.paused).length,
     lastResult: state?.lastResult ?? null,
     lastCheckedAt: state?.lastCheckedAt ?? store.lastCheck(monitor.id)?.checkedAt ?? null,
     nextCheckAt: state?.nextCheckAt ?? null,
@@ -130,7 +137,11 @@ export async function buildServer() {
     // like req.url.startsWith('/api/') misses "/%61pi/status" -- which reaches
     // the handler as /api/status and would run without ever being challenged.
     const route = req.routeOptions?.url;
-    if (!route || !route.startsWith('/api/')) return;
+    if (!route) return;
+    // `/metrics` is not under `/api/` but carries the same monitor names and
+    // states as `/api/status`, so it is challenged the same way. Prometheus
+    // sends the password as a bearer token.
+    if (!route.startsWith('/api/') && route !== '/metrics') return;
     if (OPEN_ROUTES.has(route)) return;
 
     const bearer = req.headers.authorization?.replace(/^Bearer\s+/i, '');
@@ -201,7 +212,7 @@ export async function buildServer() {
     const suppressed = monitors.filter((m) => !m.paused && scheduler.getState(m.id)?.status === 'suppressed');
     return {
       ok: true,
-      version: '0.1.0',
+      version: VERSION,
       monitors: monitors.length,
       down: down.length,
       suppressed: suppressed.length,
@@ -209,13 +220,25 @@ export async function buildServer() {
     };
   });
 
+  // --------------------------------------------------------------- metrics
+
+  // Prometheus text exposition. Behind the same auth as /api/* when a
+  // password is set; open otherwise, like the rest of the app on a trusted LAN.
+  app.get('/metrics', async (_req, reply) => {
+    reply.header('content-type', 'text/plain; version=0.0.4; charset=utf-8');
+    return renderMetrics();
+  });
+
   // -------------------------------------------------------------- monitors
 
-  app.get('/api/status', async () => ({
-    generatedAt: Date.now(),
-    notificationsConfigured: config.ntfy.topic !== '',
-    monitors: store.listMonitors().map(describe),
-  }));
+  app.get('/api/status', async () => {
+    const all = store.listMonitors();
+    return {
+      generatedAt: Date.now(),
+      notificationsConfigured: config.ntfy.topic !== '',
+      monitors: all.map((m) => describe(m, all)),
+    };
+  });
 
   app.get('/api/monitors', async () => store.listMonitors().map(redact));
 

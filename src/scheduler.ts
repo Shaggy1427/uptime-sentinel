@@ -199,6 +199,25 @@ export class Scheduler {
   async runNow(monitorId: number): Promise<CheckResult | null> {
     const monitor = getMonitor(monitorId);
     if (!monitor || monitor.paused) return null;
+
+    // A suppressed monitor is one whose dependency is down, so its own result is
+    // meaningless. The scheduled path skips it entirely; a manual check must do
+    // the same, or it records a not-our-fault failure into the uptime figure and
+    // fires a DOWN alert for something the operator already knows about.
+    const blockedBy = this.suppressor(monitor);
+    if (blockedBy) {
+      const state = this.states.get(monitor.id) ?? freshState();
+      this.states.set(monitor.id, state);
+      state.status = 'suppressed';
+      state.suppressedBy = blockedBy.id;
+      return {
+        ok: false,
+        statusCode: null,
+        latencyMs: null,
+        error: `Not checked: "${blockedBy.name}" is down`,
+      };
+    }
+
     return this.execute(monitor);
   }
 
