@@ -6,6 +6,7 @@ import {
   getMonitor,
   insertCheck,
   listMonitors,
+  listOpenIncidents,
   markIncidentAlerted,
   markIncidentReminded,
   openIncidentFor,
@@ -16,7 +17,7 @@ import {
 import { runCheck } from './checks/index.ts';
 import { dispatch } from './notify/index.ts';
 import { config } from './config.ts';
-import type { CheckResult, Monitor, MonitorStatus } from './types.ts';
+import type { CheckResult, Incident, Monitor, MonitorStatus } from './types.ts';
 
 interface RuntimeState {
   status: MonitorStatus;
@@ -79,12 +80,22 @@ export class Scheduler {
 
   /** Restore DOWN state across restarts so an open incident is not re-alerted from zero. */
   private rehydrate(): void {
+    // One scan for every open incident, instead of one query per monitor.
+    // /api/status already does this; the startup path that should mirror it
+    // was still paying N+1.
+    const incidentByMonitor = new Map<number, Incident>();
+    for (const incident of listOpenIncidents()) {
+      // listOpenIncidents is newest-first, so the first one seen per monitor is
+      // the one openIncidentFor would have returned.
+      if (!incidentByMonitor.has(incident.monitorId)) incidentByMonitor.set(incident.monitorId, incident);
+    }
+
     for (const monitor of listMonitors()) {
       const state = freshState();
       if (monitor.paused) {
         state.status = 'paused';
       } else {
-        const incident = openIncidentFor(monitor.id);
+        const incident = incidentByMonitor.get(monitor.id);
         if (incident) {
           state.status = 'down';
           state.firstFailureAt = incident.startedAt;
@@ -131,12 +142,17 @@ export class Scheduler {
         // the first check after a resume computes downtime from the original
         // startedAt -- the whole paused span -- and emits a RECOVERED (or a
         // late DOWN) citing hours that were just the monitor sitting paused.
-        if (state.status === 'down') {
-          const incident = openIncidentFor(monitor.id);
-          if (incident) {
-            resolveIncident(incident.id, Date.now());
-            console.log(`[scheduler] "${monitor.name}" paused with an open incident; closed it silently`);
-          }
+        //
+        // Decided on the database, not the in-memory status: an incident can
+        // be open while the status is anything but 'down' -- handleUp leaves
+        // it open when every RECOVERED dispatch failed, and a monitor whose
+        // ancestor died mid-outage flips to 'suppressed' with the incident
+        // still open. Gating on state.status === 'down' left those incidents
+        // open across the pause.
+        const incident = openIncidentFor(monitor.id);
+        if (incident) {
+          resolveIncident(incident.id, Date.now());
+          console.log(`[scheduler] "${monitor.name}" paused with an open incident; closed it silently`);
         }
 
         state.status = 'paused';
@@ -346,8 +362,14 @@ export class Scheduler {
     state.consecutiveFailures += 1;
     if (state.firstFailureAt === null) state.firstFailureAt = now;
 
-    // Not enough consecutive failures yet - treat as a blip, stay quiet.
-    if (state.consecutiveFailures < Math.max(1, monitor.retries)) {
+    // Not enough consecutive failures yet - treat as a blip, stay quiet --
+    // unless the monitor is already marked down. That combination can only
+    // come from rehydrate(): an incident that was open at shutdown, whose
+    // restored streak (incident.checksFailed) is shorter than a `retries`
+    // value raised while the outage was in flight. The monitor IS down and
+    // its alerts are mid-flight; degrading to 'pending' would stall the
+    // reminders and misreport the outage until the streak rebuilt.
+    if (state.consecutiveFailures < Math.max(1, monitor.retries) && state.status !== 'down') {
       state.status = 'pending';
       return;
     }
