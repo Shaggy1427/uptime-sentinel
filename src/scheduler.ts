@@ -6,6 +6,7 @@ import {
   getMonitor,
   insertCheck,
   listMonitors,
+  listOpenIncidents,
   markIncidentAlerted,
   markIncidentReminded,
   openIncidentFor,
@@ -16,7 +17,7 @@ import {
 import { runCheck } from './checks/index.ts';
 import { dispatch } from './notify/index.ts';
 import { config } from './config.ts';
-import type { CheckResult, Monitor, MonitorStatus } from './types.ts';
+import type { CheckResult, Incident, Monitor, MonitorStatus } from './types.ts';
 
 interface RuntimeState {
   status: MonitorStatus;
@@ -87,12 +88,22 @@ export class Scheduler {
 
   /** Restore DOWN state across restarts so an open incident is not re-alerted from zero. */
   private rehydrate(): void {
+    // One scan for every open incident, instead of one query per monitor.
+    // /api/status already does this; the startup path that should mirror it
+    // was still paying N+1.
+    const incidentByMonitor = new Map<number, Incident>();
+    for (const incident of listOpenIncidents()) {
+      // listOpenIncidents is newest-first, so the first one seen per monitor is
+      // the one openIncidentFor would have returned.
+      if (!incidentByMonitor.has(incident.monitorId)) incidentByMonitor.set(incident.monitorId, incident);
+    }
+
     for (const monitor of listMonitors()) {
       const state = freshState();
       if (monitor.paused) {
         state.status = 'paused';
       } else {
-        const incident = openIncidentFor(monitor.id);
+        const incident = incidentByMonitor.get(monitor.id);
         if (incident) {
           state.status = 'down';
           state.firstFailureAt = incident.startedAt;
@@ -139,12 +150,17 @@ export class Scheduler {
         // the first check after a resume computes downtime from the original
         // startedAt -- the whole paused span -- and emits a RECOVERED (or a
         // late DOWN) citing hours that were just the monitor sitting paused.
-        if (state.status === 'down') {
-          const incident = openIncidentFor(monitor.id);
-          if (incident) {
-            resolveIncident(incident.id, Date.now());
-            console.log(`[scheduler] "${monitor.name}" paused with an open incident; closed it silently`);
-          }
+        //
+        // Decided on the database, not the in-memory status: an incident can
+        // be open while the status is anything but 'down' -- handleUp leaves
+        // it open when every RECOVERED dispatch failed, and a monitor whose
+        // ancestor died mid-outage flips to 'suppressed' with the incident
+        // still open. Gating on state.status === 'down' left those incidents
+        // open across the pause.
+        const incident = openIncidentFor(monitor.id);
+        if (incident) {
+          resolveIncident(incident.id, Date.now());
+          console.log(`[scheduler] "${monitor.name}" paused with an open incident; closed it silently`);
         }
 
         state.status = 'paused';
@@ -211,9 +227,14 @@ export class Scheduler {
     return null;
   }
 
-  /** Names of the monitors this one is standing in for, for a grouped alert. */
-  private suppressedNames(monitor: Monitor): string[] {
-    return descendantsOf(monitor.id)
+  /**
+   * Names of the monitors this one is standing in for, for a grouped alert.
+   *
+   * `monitors` is the snapshot the caller already holds; without it this
+   * triggers a full listMonitors query in the middle of alert dispatch.
+   */
+  private suppressedNames(monitor: Monitor, monitors?: Monitor[]): string[] {
+    return descendantsOf(monitor.id, monitors)
       .filter((m) => !m.paused)
       .map((m) => m.name);
   }
@@ -225,7 +246,14 @@ export class Scheduler {
       return;
     }
 
-    const blockedBy = this.suppressor(monitor);
+    // One monitor-list snapshot for the whole tick. suppressor and the alert
+    // paths each used to trigger their own listMonitors query; the graph is
+    // not going to change in the microseconds between them, and after the
+    // check the snapshot is only used to name dependents in an alert, where
+    // a few seconds of staleness is cosmetic.
+    const monitors = listMonitors();
+
+    const blockedBy = this.suppressor(monitor, monitors);
     if (blockedBy) {
       const state = this.states.get(monitor.id) ?? freshState();
       this.states.set(monitor.id, state);
@@ -241,7 +269,7 @@ export class Scheduler {
       this.states.get(monitor.id)!.suppressedBy = null;
     }
 
-    await this.execute(monitor);
+    await this.execute(monitor, monitors);
     // Re-read after the (possibly long) check: the monitor may have been
     // paused or deleted while the check was in flight, in which case the
     // stale snapshot must not resurrect its timer.
@@ -258,7 +286,8 @@ export class Scheduler {
     // meaningless. The scheduled path skips it entirely; a manual check must do
     // the same, or it records a not-our-fault failure into the uptime figure and
     // fires a DOWN alert for something the operator already knows about.
-    const blockedBy = this.suppressor(monitor);
+    const monitors = listMonitors();
+    const blockedBy = this.suppressor(monitor, monitors);
     if (blockedBy) {
       const state = this.states.get(monitor.id) ?? freshState();
       this.states.set(monitor.id, state);
@@ -272,10 +301,10 @@ export class Scheduler {
       };
     }
 
-    return this.execute(monitor);
+    return this.execute(monitor, monitors);
   }
 
-  private async execute(monitor: Monitor): Promise<CheckResult> {
+  private async execute(monitor: Monitor, monitors?: Monitor[]): Promise<CheckResult> {
     const state = this.states.get(monitor.id) ?? freshState();
     this.states.set(monitor.id, state);
 
@@ -306,8 +335,8 @@ export class Scheduler {
         // monitor as inert and do not open/resolve incidents or send alerts.
         if (current.paused) return result;
 
-        if (result.ok) await this.handleUp(current, state, now);
-        else await this.handleDown(current, state, result, now);
+        if (result.ok) await this.handleUp(current, state, now, monitors);
+        else await this.handleDown(current, state, result, now, monitors);
       } catch (err) {
         console.error(`[scheduler] post-check handling failed for "${current.name}":`, err);
       }
@@ -318,7 +347,7 @@ export class Scheduler {
     }
   }
 
-  private async handleUp(monitor: Monitor, state: RuntimeState, now: number): Promise<void> {
+  private async handleUp(monitor: Monitor, state: RuntimeState, now: number, monitors?: Monitor[]): Promise<void> {
     const incident = openIncidentFor(monitor.id);
     state.consecutiveFailures = 0;
     state.firstFailureAt = null;
@@ -340,7 +369,7 @@ export class Scheduler {
       reason: null,
       downForMs: now - incident.startedAt,
       at: now,
-      suppressed: this.suppressedNames(monitor),
+      suppressed: this.suppressedNames(monitor, monitors),
     });
 
     // Mirror the DOWN path: only close the incident once the RECOVERED alert
@@ -362,12 +391,19 @@ export class Scheduler {
     state: RuntimeState,
     result: CheckResult,
     now: number,
+    monitors?: Monitor[],
   ): Promise<void> {
     state.consecutiveFailures += 1;
     if (state.firstFailureAt === null) state.firstFailureAt = now;
 
-    // Not enough consecutive failures yet - treat as a blip, stay quiet.
-    if (state.consecutiveFailures < Math.max(1, monitor.retries)) {
+    // Not enough consecutive failures yet - treat as a blip, stay quiet --
+    // unless the monitor is already marked down. That combination can only
+    // come from rehydrate(): an incident that was open at shutdown, whose
+    // restored streak (incident.checksFailed) is shorter than a `retries`
+    // value raised while the outage was in flight. The monitor IS down and
+    // its alerts are mid-flight; degrading to 'pending' would stall the
+    // reminders and misreport the outage until the streak rebuilt.
+    if (state.consecutiveFailures < Math.max(1, monitor.retries) && state.status !== 'down') {
       state.status = 'pending';
       return;
     }
@@ -393,7 +429,7 @@ export class Scheduler {
           reason: result.error,
           downForMs,
           at: now,
-          suppressed: this.suppressedNames(monitor),
+          suppressed: this.suppressedNames(monitor, monitors),
         });
         // Only record the alert once it was actually delivered somewhere.
         // Otherwise the next failing check retries, so a momentary ntfy
@@ -417,7 +453,7 @@ export class Scheduler {
           reason: result.error,
           downForMs,
           at: now,
-          suppressed: this.suppressedNames(monitor),
+          suppressed: this.suppressedNames(monitor, monitors),
         });
         if (results.some((r) => r.ok)) {
           markIncidentReminded(incident.id, now);

@@ -1,4 +1,4 @@
-import { DatabaseSync } from 'node:sqlite';
+import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
 import { config } from './config.ts';
@@ -11,6 +11,31 @@ export const db = new DatabaseSync(config.dbPath);
 db.exec('PRAGMA journal_mode = WAL');
 db.exec('PRAGMA foreign_keys = ON');
 db.exec('PRAGMA busy_timeout = 5000');
+
+/**
+ * Compiled-statement cache.
+ *
+ * `db.prepare()` compiles the SQL from scratch on every call, and these
+ * queries run constantly: one per check insert, one per monitor list on
+ * every tick and sync, three windows of rollups per Prometheus scrape.
+ * The SQL strings here are static, so each one is compiled once and
+ * reused; StatementSync is stateless between runs (parameters are passed
+ * per call), so sharing it is safe.
+ *
+ * Queries assembled dynamically (updateMonitor's SET clause) stay on
+ * db.prepare, since caching those would grow the map with per-patch
+ * variants for no real win.
+ */
+const statements = new Map<string, StatementSync>();
+
+function prepared(query: string): StatementSync {
+  let stmt = statements.get(query);
+  if (stmt === undefined) {
+    stmt = db.prepare(query);
+    statements.set(query, stmt);
+  }
+  return stmt;
+}
 
 // ---------------------------------------------------------------- migrations
 
@@ -85,7 +110,7 @@ const MIGRATIONS: string[] = [
 ];
 
 function migrate(): void {
-  const row = db.prepare('PRAGMA user_version').get() as { user_version: number };
+  const row = prepared('PRAGMA user_version').get() as { user_version: number };
   let version = Number(row.user_version ?? 0);
   for (let i = version; i < MIGRATIONS.length; i++) {
     db.exec('BEGIN');
@@ -189,19 +214,31 @@ const bool = (v: boolean) => (v ? 1 : 0);
 // ------------------------------------------------------------------ monitors
 
 export function listMonitors(): Monitor[] {
-  return (db.prepare('SELECT * FROM monitors ORDER BY name COLLATE NOCASE').all() as Row[]).map(toMonitor);
+  return (prepared('SELECT * FROM monitors ORDER BY name COLLATE NOCASE').all() as Row[]).map(toMonitor);
 }
 
 export function getMonitor(id: number): Monitor | null {
-  const r = db.prepare('SELECT * FROM monitors WHERE id = ?').get(id) as Row | undefined;
+  const r = prepared('SELECT * FROM monitors WHERE id = ?').get(id) as Row | undefined;
   return r ? toMonitor(r) : null;
+}
+
+/**
+ * id -> name for every monitor, from a two-column query.
+ *
+ * Callers that only need names (the incidents endpoint annotating rows with
+ * monitorName) used to pay listMonitors() for it: every row mapped field by
+ * field, including a JSON.parse of stored headers per monitor, just to throw
+ * all but id and name away.
+ */
+export function monitorNameMap(): Map<number, string> {
+  const rows = db.prepare('SELECT id, name FROM monitors').all() as { id: number; name: string }[];
+  return new Map(rows.map((r) => [Number(r.id), String(r.name)]));
 }
 
 export function createMonitor(input: MonitorInput): Monitor {
   const now = Date.now();
   const d = config.defaults;
-  const info = db
-    .prepare(
+  const info = prepared(
       `INSERT INTO monitors
        (name, type, target, interval_s, timeout_ms, retries, alert_after_s, reminder_every_s,
         accepted_status, keyword, keyword_inverted, ignore_tls, method, headers,
@@ -275,21 +312,20 @@ export function updateMonitor(id: number, patch: Partial<MonitorInput>): Monitor
 }
 
 export function deleteMonitor(id: number): boolean {
-  return Number(db.prepare('DELETE FROM monitors WHERE id = ?').run(id).changes) > 0;
+  return Number(prepared('DELETE FROM monitors WHERE id = ?').run(id).changes) > 0;
 }
 
 // -------------------------------------------------------------------- checks
 
 export function insertCheck(monitorId: number, result: CheckResult, at = Date.now()): void {
-  db.prepare(
+  prepared(
     'INSERT INTO checks (monitor_id, ok, status_code, latency_ms, error, checked_at) VALUES (?,?,?,?,?,?)',
   ).run(monitorId, bool(result.ok), result.statusCode, result.latencyMs, result.error, at);
 }
 
 export function recentChecks(monitorId: number, limit = 60): Check[] {
   return (
-    db
-      .prepare('SELECT * FROM checks WHERE monitor_id = ? ORDER BY checked_at DESC LIMIT ?')
+    prepared('SELECT * FROM checks WHERE monitor_id = ? ORDER BY checked_at DESC LIMIT ?')
       .all(monitorId, limit) as Row[]
   )
     .map(toCheck)
@@ -304,8 +340,7 @@ export function recentChecks(monitorId: number, limit = 60): Check[] {
  * scan instead of a `recentChecks` query per monitor.
  */
 export function recentChecksAll(perMonitor: number): Map<number, Check[]> {
-  const rows = db
-    .prepare(
+  const rows = prepared(
       `SELECT * FROM (
          SELECT *, ROW_NUMBER() OVER (PARTITION BY monitor_id ORDER BY checked_at DESC) AS rn
          FROM checks
@@ -325,8 +360,7 @@ export function recentChecksAll(perMonitor: number): Map<number, Check[]> {
 }
 
 export function lastCheck(monitorId: number): Check | null {
-  const r = db
-    .prepare('SELECT * FROM checks WHERE monitor_id = ? ORDER BY checked_at DESC LIMIT 1')
+  const r = prepared('SELECT * FROM checks WHERE monitor_id = ? ORDER BY checked_at DESC LIMIT 1')
     .get(monitorId) as Row | undefined;
   return r ? toCheck(r) : null;
 }
@@ -339,8 +373,7 @@ export interface UptimeStats {
 }
 
 export function uptimeSince(monitorId: number, sinceMs: number): UptimeStats {
-  const r = db
-    .prepare(
+  const r = prepared(
       `SELECT COUNT(*) AS total,
               COALESCE(SUM(ok), 0) AS up,
               AVG(CASE WHEN ok = 1 THEN latency_ms END) AS avg_latency
@@ -387,8 +420,9 @@ export function uptimeSinceAll(cutoffs: number[]): Map<number, UptimeStats[]> {
   });
   params.push(Math.min(...cutoffs));
 
-  const rows = db
-    .prepare(
+  // The assembled SQL only varies with the number of windows, which is fixed
+  // per call site, so this is as cacheable as a static string.
+  const rows = prepared(
       `SELECT monitor_id, ${columns.join(', ')}
        FROM checks WHERE checked_at >= ? GROUP BY monitor_id`,
     )
@@ -414,14 +448,13 @@ export function uptimeSinceAll(cutoffs: number[]): Map<number, UptimeStats[]> {
 }
 
 export function pruneChecks(beforeMs: number): number {
-  return Number(db.prepare('DELETE FROM checks WHERE checked_at < ?').run(beforeMs).changes);
+  return Number(prepared('DELETE FROM checks WHERE checked_at < ?').run(beforeMs).changes);
 }
 
 // ----------------------------------------------------------------- incidents
 
 export function openIncidentFor(monitorId: number): Incident | null {
-  const r = db
-    .prepare('SELECT * FROM incidents WHERE monitor_id = ? AND resolved_at IS NULL ORDER BY started_at DESC LIMIT 1')
+  const r = prepared('SELECT * FROM incidents WHERE monitor_id = ? AND resolved_at IS NULL ORDER BY started_at DESC LIMIT 1')
     .get(monitorId) as Row | undefined;
   return r ? toIncident(r) : null;
 }
@@ -432,34 +465,33 @@ export function createIncident(
   cause: string | null,
   checksFailed = 1,
 ): Incident {
-  const info = db
-    .prepare('INSERT INTO incidents (monitor_id, started_at, cause, checks_failed) VALUES (?,?,?,?)')
+  const info = prepared('INSERT INTO incidents (monitor_id, started_at, cause, checks_failed) VALUES (?,?,?,?)')
     .run(monitorId, startedAt, cause, checksFailed);
   return getIncident(Number(info.lastInsertRowid))!;
 }
 
 export function getIncident(id: number): Incident | null {
-  const r = db.prepare('SELECT * FROM incidents WHERE id = ?').get(id) as Row | undefined;
+  const r = prepared('SELECT * FROM incidents WHERE id = ?').get(id) as Row | undefined;
   return r ? toIncident(r) : null;
 }
 
 export function bumpIncident(id: number, cause: string | null): void {
-  db.prepare('UPDATE incidents SET checks_failed = checks_failed + 1, cause = COALESCE(?, cause) WHERE id = ?').run(
+  prepared('UPDATE incidents SET checks_failed = checks_failed + 1, cause = COALESCE(?, cause) WHERE id = ?').run(
     cause,
     id,
   );
 }
 
 export function markIncidentAlerted(id: number, at: number): void {
-  db.prepare('UPDATE incidents SET alerted_at = ?, last_reminder_at = ? WHERE id = ?').run(at, at, id);
+  prepared('UPDATE incidents SET alerted_at = ?, last_reminder_at = ? WHERE id = ?').run(at, at, id);
 }
 
 export function markIncidentReminded(id: number, at: number): void {
-  db.prepare('UPDATE incidents SET last_reminder_at = ? WHERE id = ?').run(at, id);
+  prepared('UPDATE incidents SET last_reminder_at = ? WHERE id = ?').run(at, id);
 }
 
 export function resolveIncident(id: number, at: number): void {
-  db.prepare('UPDATE incidents SET resolved_at = ? WHERE id = ?').run(at, id);
+  prepared('UPDATE incidents SET resolved_at = ? WHERE id = ?').run(at, id);
 }
 
 /**
@@ -470,7 +502,7 @@ export function resolveIncident(id: number, at: number): void {
  */
 export function listOpenIncidents(): Incident[] {
   return (
-    db.prepare('SELECT * FROM incidents WHERE resolved_at IS NULL ORDER BY started_at DESC').all() as Row[]
+    prepared('SELECT * FROM incidents WHERE resolved_at IS NULL ORDER BY started_at DESC').all() as Row[]
   ).map(toIncident);
 }
 
@@ -478,7 +510,7 @@ export function listIncidents(limit = 50, monitorId?: number): Incident[] {
   const sql = monitorId
     ? 'SELECT * FROM incidents WHERE monitor_id = ? ORDER BY started_at DESC LIMIT ?'
     : 'SELECT * FROM incidents ORDER BY started_at DESC LIMIT ?';
-  const rows = (monitorId ? db.prepare(sql).all(monitorId, limit) : db.prepare(sql).all(limit)) as Row[];
+  const rows = (monitorId ? prepared(sql).all(monitorId, limit) : prepared(sql).all(limit)) as Row[];
   return rows.map(toIncident);
 }
 
@@ -554,8 +586,13 @@ export function descendantCountMap(monitors: Monitor[]): Map<number, number> {
 
   for (const m of monitors) {
     if (m.paused) continue;
+    // Walk defensively: cycles are rejected on write, but a corrupt or
+    // hand-edited database must not be able to hang the caller (this runs on
+    // every /api/status poll) the same way ancestorsOf refuses to.
+    const seen = new Set<number>([m.id]);
     let current = m.parentId;
-    while (current !== null) {
+    while (current !== null && !seen.has(current)) {
+      seen.add(current);
       const ancestor = byId.get(current);
       if (!ancestor) break;
       counts.set(ancestor.id, (counts.get(ancestor.id) ?? 0) + 1);

@@ -67,6 +67,26 @@ test('a self / cyclic parent reference is rejected', () => {
   assert.equal(store.listMonitors()[0]!.parentId, null);
 });
 
+test('a parent name matches case-insensitively, like config import', () => {
+  // The same file imports its dependency fine through /api/config/import,
+  // which matches names case-insensitively. Seeding used to be case-sensitive
+  // and silently dropped the dependency, leaving the child alerting on its
+  // own while the parent was down.
+  writeSeed([tcp('Plex', { parent: 'UNRAID' }), tcp('Unraid')]);
+
+  assert.equal(seedIfEmpty(), 2);
+  const byName = new Map(store.listMonitors().map((m) => [m.name, m]));
+  assert.equal(byName.get('Plex')!.parentId, byName.get('Unraid')!.id);
+});
+
+test('an ambiguous case-insensitive parent name is still an error, not a guess', () => {
+  writeSeed([tcp('Plex', { parent: 'ROUTER' }), tcp('Router'), tcp('router')]);
+
+  assert.equal(seedIfEmpty(), 3);
+  const plex = store.listMonitors().find((m) => m.name === 'Plex')!;
+  assert.equal(plex.parentId, null);
+});
+
 test('seeding still no-ops on a non-empty database', () => {
   store.createMonitor(tcp('Existing') as never);
   writeSeed([tcp('New')]);
