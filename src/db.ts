@@ -344,6 +344,11 @@ export function resolveIncident(id: number, at: number): void {
   db.prepare('UPDATE incidents SET resolved_at = ? WHERE id = ?').run(at, id);
 }
 
+export function openIncidentCount(): number {
+  const r = db.prepare('SELECT COUNT(*) AS n FROM incidents WHERE resolved_at IS NULL').get() as Row;
+  return Number(r.n);
+}
+
 export function listIncidents(limit = 50, monitorId?: number): Incident[] {
   const sql = monitorId
     ? 'SELECT * FROM incidents WHERE monitor_id = ? ORDER BY started_at DESC LIMIT ?'

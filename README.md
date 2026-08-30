@@ -352,8 +352,40 @@ Everything the dashboard does is a plain REST call, so you can script it.
 | `POST` | `/api/monitors/:id/check` | Run a check right now |
 | `GET` | `/api/incidents` | Incident history |
 | `POST` | `/api/test-notification` | Send a test push |
+| `GET` | `/metrics` | Prometheus metrics. Auth required when `AUTH_PASSWORD` is set |
 
 With `AUTH_PASSWORD` set, pass `Authorization: Bearer <password>`.
+
+## Prometheus
+
+`GET /metrics` exposes every monitor's state in the Prometheus text format. When
+`AUTH_PASSWORD` is set it sits behind the same auth as the rest of the API, so
+hand Prometheus the password as a bearer token:
+
+```yaml
+scrape_configs:
+  - job_name: uptime-sentinel
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['raspberrypi.local:8080']
+    # Only needed when AUTH_PASSWORD is set:
+    authorization:
+      credentials: 'your-dashboard-password'
+```
+
+The interesting series, all gauges labelled `monitor` (name) and `id`:
+
+| Metric | Meaning |
+|--------|---------|
+| `sentinel_monitor_up` | `1` when the last check passed, `0` for any other state |
+| `sentinel_monitor_status{status=…}` | `1` on the series naming the current state (`up`, `down`, `pending`, `suppressed`, `paused`) |
+| `sentinel_monitor_up_ratio{window=…}` | pass ratio over `1d` / `7d` / `30d` |
+| `sentinel_monitor_avg_latency_ms{window=…}` | mean latency of passing checks over the same windows |
+| `sentinel_monitor_last_check_latency_ms` | latency of the most recent check |
+| `sentinel_monitor_last_check_timestamp_seconds` | when the most recent check ran |
+| `sentinel_monitor_down_since_seconds` | age of the current incident; absent unless down |
+| `sentinel_monitors_down` / `sentinel_monitors_suppressed` / `sentinel_monitors_paused` | counts by state |
+| `sentinel_incidents_open` | unresolved incidents |
 
 ## Security
 
@@ -380,6 +412,10 @@ returned by the API — responses show the header names with `<redacted>` values
 
 **`/api/health` is deliberately unauthenticated** so an external dead-man's-switch
 can poll it. It returns only counts and a version, never targets.
+
+**`/metrics` follows the API, not `/api/health`.** It carries monitor names and
+per-monitor state, so when `AUTH_PASSWORD` is set the scraper must authenticate
+(bearer token). With no password set it is open, like everything else.
 
 **Behind a reverse proxy**, set `TRUST_PROXY=true` so rate limits key on the real
 client rather than the proxy. Do not set it otherwise: without a proxy stripping

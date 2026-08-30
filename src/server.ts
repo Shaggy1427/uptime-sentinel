@@ -12,6 +12,7 @@ import { dispatch } from './notify/index.ts';
 import { validateMonitor, ValidationError } from './validate.ts';
 import type { ValidateOptions } from './validate.ts';
 import { cookieSecret, secretEquals } from './secret.ts';
+import { renderMetrics } from './metrics.ts';
 import type { Monitor } from './types.ts';
 
 const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
@@ -130,7 +131,11 @@ export async function buildServer() {
     // like req.url.startsWith('/api/') misses "/%61pi/status" -- which reaches
     // the handler as /api/status and would run without ever being challenged.
     const route = req.routeOptions?.url;
-    if (!route || !route.startsWith('/api/')) return;
+    if (!route) return;
+    // `/metrics` is not under `/api/` but carries the same monitor names and
+    // states as `/api/status`, so it is challenged the same way. Prometheus
+    // sends the password as a bearer token.
+    if (!route.startsWith('/api/') && route !== '/metrics') return;
     if (OPEN_ROUTES.has(route)) return;
 
     const bearer = req.headers.authorization?.replace(/^Bearer\s+/i, '');
@@ -207,6 +212,15 @@ export async function buildServer() {
       suppressed: suppressed.length,
       uptimeS: Math.round(process.uptime()),
     };
+  });
+
+  // --------------------------------------------------------------- metrics
+
+  // Prometheus text exposition. Behind the same auth as /api/* when a
+  // password is set; open otherwise, like the rest of the app on a trusted LAN.
+  app.get('/metrics', async (_req, reply) => {
+    reply.header('content-type', 'text/plain; version=0.0.4; charset=utf-8');
+    return renderMetrics();
   });
 
   // -------------------------------------------------------------- monitors
