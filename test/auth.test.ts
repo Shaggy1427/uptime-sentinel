@@ -52,6 +52,20 @@ test('password and bearer token grant access', async () => {
   assert.equal(withBearer.statusCode, 200);
 });
 
+test('/metrics is guarded and accepts the bearer token', async () => {
+  const denied = await app.inject({ method: 'GET', url: '/metrics' });
+  assert.equal(denied.statusCode, 401);
+
+  const ok = await app.inject({
+    method: 'GET',
+    url: '/metrics',
+    headers: { authorization: 'Bearer hunter2' },
+  });
+  assert.equal(ok.statusCode, 200);
+  assert.match(ok.headers['content-type'] ?? '', /text\/plain/);
+  assert.match(ok.body, /sentinel_build_info/);
+});
+
 test('repeated failed logins are rate limited', async () => {
   let last;
   for (let i = 0; i < 15; i++) {
