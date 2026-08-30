@@ -11,6 +11,7 @@ import {
   openIncidentFor,
   pruneChecks,
   resolveIncident,
+  db,
 } from './db.ts';
 import { runCheck } from './checks/index.ts';
 import { dispatch } from './notify/index.ts';
@@ -359,6 +360,7 @@ export class Scheduler {
     const cutoff = Date.now() - config.retentionDays * 86_400_000;
     const removed = pruneChecks(cutoff);
     if (removed > 0) console.log(`[prune] removed ${removed} check rows older than ${config.retentionDays}d`);
+    db.exec('VACUUM');
   }
 
   /**
