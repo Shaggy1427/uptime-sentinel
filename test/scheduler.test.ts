@@ -238,3 +238,33 @@ test('a restart keeps an in-flight outage down even after retries was raised', a
   assert.equal(scheduler.getState(monitorId)?.status, 'down', 'an open incident must not read as pending');
   assert.equal(store.openIncidentFor(monitorId)!.checksFailed, 2, 'the failing check was counted');
 });
+
+test('sync pulls the next check back to the interval after it is lowered', async () => {
+  scheduler.start();
+  try {
+    const slowId = store.createMonitor({
+      name: 'slowpoke',
+      type: 'tcp',
+      target: '127.0.0.1:9',
+      intervalS: 3600,
+    }).id;
+    scheduler.sync(); // create the state + jitter timer for the new monitor
+
+    // Replace the jitter timer with one pretending the monitor is mid-way
+    // through its old full-hour interval.
+    scheduler['states'].get(slowId)!.nextCheckAt = Date.now() + 3_600_000;
+    const planted = setTimeout(() => {}, 3_600_000);
+    planted.unref();
+    clearTimeout(scheduler['timers'].get(slowId)!);
+    scheduler['timers'].set(slowId, planted);
+
+    store.updateMonitor(slowId, { intervalS: 60 });
+    scheduler.sync();
+
+    const next = scheduler.getState(slowId)!.nextCheckAt!;
+    const waitS = Math.round((next - Date.now()) / 1000);
+    assert.ok(waitS <= 60, `next check must follow the new interval, still waiting ${waitS}s`);
+  } finally {
+    scheduler.stop();
+  }
+});
