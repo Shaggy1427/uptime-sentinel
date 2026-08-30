@@ -11,9 +11,11 @@ export async function httpCheck(monitor: Monitor): Promise<CheckResult> {
     const statusCode = res.status;
 
     let found = false;
+    let truncated = false;
     if (monitor.keyword) {
-      const body = await readBodyCapped(res, BODY_CAP_BYTES);
-      found = body.includes(monitor.keyword);
+      const capped = await readBodyCapped(res, BODY_CAP_BYTES);
+      found = capped.body.includes(monitor.keyword);
+      truncated = capped.truncated;
     } else {
       // Drain so the socket returns to the pool instead of hanging around.
       await res.body?.cancel().catch(() => {});
@@ -26,11 +28,15 @@ export async function httpCheck(monitor: Monitor): Promise<CheckResult> {
     }
 
     if (monitor.keyword) {
+      // Where the keyword was not seen, say whether the whole body was scanned:
+      // "not found" on a body we only read a 2 MB prefix of is not the same
+      // claim as "not found" on the whole thing.
+      const scanned = truncated ? ` (first ${Math.round(BODY_CAP_BYTES / (1024 * 1024))} MB only)` : '';
       if (monitor.keywordInverted && found) {
         return { ok: false, statusCode, latencyMs, error: `Forbidden keyword "${monitor.keyword}" present in body` };
       }
       if (!monitor.keywordInverted && !found) {
-        return { ok: false, statusCode, latencyMs, error: `Keyword "${monitor.keyword}" not found in body` };
+        return { ok: false, statusCode, latencyMs, error: `Keyword "${monitor.keyword}" not found in body${scanned}` };
       }
     }
 

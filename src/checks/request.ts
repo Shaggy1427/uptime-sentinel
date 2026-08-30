@@ -28,10 +28,22 @@ export function buildInit(monitor: Monitor): RequestInit {
   return init as RequestInit;
 }
 
-/** Read a response body up to `cap` bytes so a huge reply cannot exhaust memory. */
-export async function readBodyCapped(res: Response, cap: number): Promise<string> {
+export interface CappedBody {
+  body: string;
+  /** True when the response was larger than `cap` and the rest was dropped. */
+  truncated: boolean;
+}
+
+/**
+ * Read a response body up to `cap` bytes so a huge reply cannot exhaust memory.
+ *
+ * Returns whether it had to stop early: a caller that parses or scans the body
+ * needs to know it only saw a prefix, or it will report a big-but-fine response
+ * as broken ("not valid JSON", "keyword not found").
+ */
+export async function readBodyCapped(res: Response, cap: number): Promise<CappedBody> {
   const reader = res.body?.getReader();
-  if (!reader) return '';
+  if (!reader) return { body: '', truncated: false };
 
   const chunks: Uint8Array[] = [];
   let size = 0;
@@ -62,7 +74,7 @@ export async function readBodyCapped(res: Response, cap: number): Promise<string
     all.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  return new TextDecoder().decode(all);
+  return { body: new TextDecoder().decode(all), truncated: !done };
 }
 
 export function describeFetchError(err: unknown, timeoutMs: number): string {
