@@ -351,8 +351,14 @@ export class Scheduler {
     state.consecutiveFailures += 1;
     if (state.firstFailureAt === null) state.firstFailureAt = now;
 
-    // Not enough consecutive failures yet - treat as a blip, stay quiet.
-    if (state.consecutiveFailures < Math.max(1, monitor.retries)) {
+    // Not enough consecutive failures yet - treat as a blip, stay quiet --
+    // unless the monitor is already marked down. That combination can only
+    // come from rehydrate(): an incident that was open at shutdown, whose
+    // restored streak (incident.checksFailed) is shorter than a `retries`
+    // value raised while the outage was in flight. The monitor IS down and
+    // its alerts are mid-flight; degrading to 'pending' would stall the
+    // reminders and misreport the outage until the streak rebuilt.
+    if (state.consecutiveFailures < Math.max(1, monitor.retries) && state.status !== 'down') {
       state.status = 'pending';
       return;
     }
