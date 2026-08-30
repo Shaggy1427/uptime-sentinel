@@ -13,6 +13,7 @@ process.env.AUTH_PASSWORD = '';
 const { buildServer } = await import('../src/server.ts');
 const { renderMetrics } = await import('../src/metrics.ts');
 const store = await import('../src/db.ts');
+const { scheduler } = await import('../src/scheduler.ts');
 
 let app: Awaited<ReturnType<typeof buildServer>>;
 
@@ -204,6 +205,7 @@ test('open incidents are counted and exposed as down_since', () => {
   const monitor = store.createMonitor({ name: 'Sad', type: 'tcp', target: '127.0.0.1:9', intervalS: 3600 });
   const now = Date.now();
   store.createIncident(monitor.id, now - 90_000, 'refused', 3);
+  scheduler['rehydrate'](); // an open incident means the monitor is down after a restart
 
   const body = renderMetrics(now);
   assert.match(body, /^sentinel_incidents_open [1-9]\d*$/m);
@@ -220,6 +222,7 @@ test('down_since reports the newest open incident when a monitor has several', (
   const now = Date.now();
   store.createIncident(monitor.id, now - 500_000, 'old', 1);
   store.createIncident(monitor.id, now - 60_000, 'new', 1);
+  scheduler['rehydrate']();
 
   // Matches openIncidentFor, which takes the most recent unresolved incident.
   const body = renderMetrics(now);
@@ -227,6 +230,41 @@ test('down_since reports the newest open incident when a monitor has several', (
     body,
     new RegExp(`^sentinel_monitor_down_since_seconds\\{id="${monitor.id}",monitor="Repeat"\\} 60$`, 'm'),
   );
+
+  store.deleteMonitor(monitor.id);
+});
+
+test('down_since is withheld while the monitor is not down', () => {
+  const monitor = store.createMonitor({ name: 'Recovering', type: 'tcp', target: '127.0.0.1:9', intervalS: 3600 });
+  const now = Date.now();
+  store.createIncident(monitor.id, now - 120_000, 'old outage', 2);
+
+  // The state after a restart whose incident is still open: down.
+  scheduler['rehydrate']();
+  assert.match(
+    renderMetrics(now),
+    new RegExp(`^sentinel_monitor_down_since_seconds\\{id="${monitor.id}",monitor="Recovering"\\}`, 'm'),
+  );
+
+  // Checks now pass, but the RECOVERED alert is still retrying delivery, so
+  // the incident is open while the monitor is up. The downtime clock must
+  // stop describing an outage that is not happening.
+  scheduler['states'].set(monitor.id, {
+    status: 'up',
+    consecutiveFailures: 0,
+    firstFailureAt: null,
+    lastResult: { ok: true, statusCode: null, latencyMs: null, error: null },
+    lastCheckedAt: now,
+    nextCheckAt: null,
+    inFlight: false,
+    suppressedBy: null,
+  });
+  assert.doesNotMatch(
+    renderMetrics(now),
+    new RegExp(`^sentinel_monitor_down_since_seconds\\{id="${monitor.id}"`, 'm'),
+  );
+  // The incident itself is still visible in the open count.
+  assert.match(renderMetrics(now), /^sentinel_incidents_open [1-9]\d*$/m);
 
   store.deleteMonitor(monitor.id);
 });

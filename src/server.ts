@@ -15,7 +15,7 @@ import { openRule } from './maintenance.ts';
 import { cookieSecret, passwordMatches } from './secret.ts';
 import { renderMetrics } from './metrics.ts';
 import { exportConfig, importConfig } from './config-io.ts';
-import type { Monitor, Incident, Check } from './types.ts';
+import type { Monitor, Incident } from './types.ts';
 
 const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 
@@ -71,7 +71,7 @@ interface StatusContext {
   monitors: Monitor[];
   byId: Map<number, Monitor>;
   openIncidentByMonitor: Map<number, Incident>;
-  historyByMonitor: Map<number, Check[]>;
+  historyByMonitor: Map<number, store.HistorySample[]>;
   /** Per monitor: [day, week, month] uptime, in that order. */
   uptimeByMonitor: Map<number, store.UptimeStats[]>;
   /** Non-paused descendant count per monitor. Pre-baked so describe is O(1). */
@@ -174,7 +174,11 @@ function describe(monitor: Monitor, ctx: StatusContext) {
     lastResult: state?.lastResult ?? null,
     lastCheckedAt: state?.lastCheckedAt ?? newestCheckAt,
     nextCheckAt: state?.nextCheckAt ?? null,
-    downSinceMs: incident ? now - incident.startedAt : null,
+    // The downtime clock only runs while the monitor is actually down. An
+    // incident can stay open while checks pass (RECOVERED delivery still
+    // retrying) or while the monitor is suppressed by an ancestor -- reporting
+    // downtime then would describe an outage that is not happening.
+    downSinceMs: incident && state?.status === 'down' ? now - incident.startedAt : null,
     alerted: incident?.alertedAt !== null && incident !== null,
     incident,
     history,

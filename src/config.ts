@@ -21,8 +21,13 @@ function method(key: string, fallback: string): string {
 function int(key: string, fallback: number, min?: number, max?: number): number {
   const v = process.env[key];
   if (v === undefined || v === '') return fallback;
-  const n = Number.parseInt(v, 10);
-  if (Number.isNaN(n)) throw new Error(`Env ${key} must be an integer, got "${v}"`);
+  // A canonical integer, not Number.parseInt: it would silently accept
+  // "30abc" as 30 and " 8" as 8 -- the exact misparse the API-side validator
+  // refuses for monitor fields. A typo in an env file should fail loudly at
+  // startup, not shrink a timeout or a port by an invisible amount.
+  if (!/^\s*-?\d+\s*$/.test(v)) throw new Error(`Env ${key} must be an integer, got "${v}"`);
+  const n = Number(v.trim());
+  if (!Number.isSafeInteger(n)) throw new Error(`Env ${key} must be an integer, got "${v}"`);
   if (min !== undefined && n < min) throw new Error(`Env ${key} must be at least ${min}, got ${n}`);
   if (max !== undefined && n > max) throw new Error(`Env ${key} must be at most ${max}, got ${n}`);
   return n;
