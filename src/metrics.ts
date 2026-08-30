@@ -124,7 +124,12 @@ export function renderMetrics(now = Date.now()): string {
       if (newestCheckAt === null || state.lastCheckedAt > newestCheckAt) newestCheckAt = state.lastCheckedAt;
     }
 
-    if (!m.paused) {
+    // Only while the monitor is actually down. An incident can stay open
+    // while the checks pass (the RECOVERED alert is still retrying delivery)
+    // or while an ancestor outage has the monitor suppressed -- a downtime
+    // clock for a monitor that is not down misfires alert rules that watch
+    // this series. The open incident itself is still counted above.
+    if (current === 'down') {
       const incident = incidentByMonitor.get(m.id);
       if (incident) {
         downSince.push(
