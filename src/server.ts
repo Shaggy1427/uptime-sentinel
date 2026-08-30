@@ -84,6 +84,9 @@ function contextForOne(monitor: Monitor): StatusContext {
   const now = Date.now();
   const monitors = store.listMonitors();
   const incident = store.openIncidentFor(monitor.id);
+  // One grouped scan for all three windows instead of three uptimeSince
+  // queries; same cutoffs /api/status uses.
+  const rollups = store.uptimeSinceAll([now - DAY, now - 7 * DAY, now - 30 * DAY]);
 
   return {
     now,
@@ -91,16 +94,9 @@ function contextForOne(monitor: Monitor): StatusContext {
     byId: new Map(monitors.map((m) => [m.id, m])),
     openIncidentByMonitor: incident ? new Map([[monitor.id, incident]]) : new Map(),
     historyByMonitor: new Map([[monitor.id, store.recentChecks(monitor.id, 40)]]),
-    uptimeByMonitor: new Map([
-      [
-        monitor.id,
-        [
-          store.uptimeSince(monitor.id, now - DAY),
-          store.uptimeSince(monitor.id, now - 7 * DAY),
-          store.uptimeSince(monitor.id, now - 30 * DAY),
-        ],
-      ],
-    ]),
+    uptimeByMonitor: rollups.has(monitor.id)
+      ? new Map([[monitor.id, rollups.get(monitor.id)!]])
+      : new Map(),
   };
 }
 
