@@ -634,11 +634,22 @@ test('/api/status reports maintenance the moment a window is created', async () 
   const app = await buildServer();
   after(() => app.close());
 
+  store.insertCheck(
+    monitorId,
+    { ok: true, statusCode: 200, latencyMs: 5, error: null },
+    Date.now() - 1000,
+  );
   const before = await app.inject({ method: 'GET', url: '/api/status' });
   assert.notEqual(before.json().monitors[0].status, 'maintenance');
   assert.equal(before.json().monitors[0].maintenance, null);
 
-  openWindowNow('immediate');
+  const window = openWindowNow('immediate');
+  store.insertCheck(
+    monitorId,
+    { ok: false, statusCode: 503, latencyMs: 10, error: 'planned' },
+    Date.now(),
+    window.id,
+  );
 
   // No tick in between: the status is resolved from the window table, not from
   // the scheduler's cached state, so it must not wait for the next check.
@@ -646,9 +657,19 @@ test('/api/status reports maintenance the moment a window is created', async () 
   const described = after_.json().monitors[0];
   assert.equal(described.status, 'maintenance');
   assert.equal(described.maintenance.name, 'immediate');
+  assert.deepEqual(
+    described.history.map((sample: { maintenanceId: number | null }) => sample.maintenanceId),
+    [null, window.id],
+    'the bulk history query preserves planned-downtime tags',
+  );
 
   const single = await app.inject({ method: 'GET', url: `/api/monitors/${monitorId}` });
   assert.equal(single.json().status, 'maintenance', 'the single-monitor route agrees');
+  assert.deepEqual(
+    single.json().history.map((sample: { maintenanceId: number | null }) => sample.maintenanceId),
+    [null, window.id],
+    'the bulk and single-monitor history routes agree',
+  );
 });
 
 test('a paused monitor reads as paused even inside an open window', async () => {

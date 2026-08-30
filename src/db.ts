@@ -414,6 +414,7 @@ export interface HistorySample {
   ok: boolean;
   latencyMs: number | null;
   checkedAt: number;
+  maintenanceId: number | null;
 }
 
 /**
@@ -425,8 +426,8 @@ export interface HistorySample {
  */
 export function recentChecksAll(perMonitor: number): Map<number, HistorySample[]> {
   const rows = prepared(
-      `SELECT monitor_id, ok, latency_ms, checked_at FROM (
-         SELECT monitor_id, ok, latency_ms, checked_at,
+      `SELECT monitor_id, ok, latency_ms, checked_at, maintenance_id FROM (
+         SELECT monitor_id, ok, latency_ms, checked_at, maintenance_id,
                 ROW_NUMBER() OVER (PARTITION BY monitor_id ORDER BY checked_at DESC) AS rn
          FROM checks
        ) WHERE rn <= ?
@@ -441,6 +442,7 @@ export function recentChecksAll(perMonitor: number): Map<number, HistorySample[]
       ok: Number(row.ok) === 1,
       latencyMs: row.latency_ms === null ? null : Number(row.latency_ms),
       checkedAt: Number(row.checked_at),
+      maintenanceId: row.maintenance_id === null ? null : Number(row.maintenance_id),
     };
     const list = out.get(sample.monitorId);
     if (list) list.push(sample);
