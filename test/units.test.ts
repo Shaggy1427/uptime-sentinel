@@ -5,6 +5,20 @@ import { parseHostPort } from '../src/checks/tcp.ts';
 import { formatDuration, headerSafe } from '../src/format.ts';
 import { validateMonitor, ValidationError } from '../src/validate.ts';
 
+test('passwordMatches is constant-time against the configured password', async () => {
+  process.env.AUTH_PASSWORD = 'hunter2';
+  const { passwordHash, passwordMatches } = await import('../src/secret.ts');
+
+  assert.ok(passwordHash() !== null, 'hash must exist when a password is configured');
+  assert.equal(passwordHash(), passwordHash(), 'the hash is cached, not recomputed');
+  assert.equal(passwordHash()!.length, 32, 'SHA-256 is 32 bytes');
+
+  assert.ok(passwordMatches('hunter2'));
+  assert.ok(!passwordMatches('Hunter2'), 'case-sensitive');
+  assert.ok(!passwordMatches(''), 'empty input never matches');
+  assert.ok(!passwordMatches('hunter2 '), 'whitespace does not match');
+});
+
 test('parseAcceptedStatus handles ranges, lists and mixtures', () => {
   const range = parseAcceptedStatus('200-299');
   assert.ok(range(200) && range(204) && range(299));

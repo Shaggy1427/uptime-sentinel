@@ -11,7 +11,7 @@ import { scheduler } from './scheduler.ts';
 import { dispatch } from './notify/index.ts';
 import { validateMonitor, ValidationError } from './validate.ts';
 import type { ValidateOptions } from './validate.ts';
-import { cookieSecret, secretEquals } from './secret.ts';
+import { cookieSecret, passwordMatches } from './secret.ts';
 import { renderMetrics } from './metrics.ts';
 import { exportConfig, importConfig } from './config-io.ts';
 import type { Monitor, Incident, Check } from './types.ts';
@@ -188,7 +188,7 @@ export async function buildServer() {
     if (OPEN_ROUTES.has(route)) return;
 
     const bearer = req.headers.authorization?.replace(/^Bearer\s+/i, '');
-    if (bearer && secretEquals(bearer, config.authPassword)) return;
+    if (bearer && passwordMatches(bearer)) return;
 
     const raw = req.cookies[AUTH_COOKIE];
     if (raw) {
@@ -225,7 +225,7 @@ export async function buildServer() {
     async (req, reply) => {
       if (!authEnabled) return { ok: true };
       const { password } = (req.body ?? {}) as { password?: string };
-      if (typeof password !== 'string' || !secretEquals(password, config.authPassword)) {
+      if (typeof password !== 'string' || !passwordMatches(password)) {
         return reply.code(401).send({ error: 'Wrong password' });
       }
       reply.setCookie(AUTH_COOKIE, 'ok', {
