@@ -87,7 +87,10 @@ export class Scheduler {
 
   /** Reconcile timers against the current monitor list. Call after any CRUD. */
   sync(): void {
-    if (!this.running) return;
+    // Timer creation is gated on `running` further down; the state reconciliation
+    // (a paused monitor's incident, the failure streak) must run either way, or
+    // a pause applied before start() -- or in a test that never calls it -- would
+    // leave a stale open incident behind.
     const monitors = listMonitors();
     const live = new Set(monitors.map((m) => m.id));
 
@@ -109,13 +112,33 @@ export class Scheduler {
           clearTimeout(timer);
           this.timers.delete(monitor.id);
         }
+
+        // Pausing means "stop watching this", so the incident timeline ends at
+        // the pause rather than spanning it. Close any open incident now, and
+        // send nothing: it was silenced, not recovered. The scheduler runs no
+        // checks while paused, so nothing else can fire for it. Without this,
+        // the first check after a resume computes downtime from the original
+        // startedAt -- the whole paused span -- and emits a RECOVERED (or a
+        // late DOWN) citing hours that were just the monitor sitting paused.
+        if (state.status === 'down') {
+          const incident = openIncidentFor(monitor.id);
+          if (incident) {
+            resolveIncident(incident.id, Date.now());
+            console.log(`[scheduler] "${monitor.name}" paused with an open incident; closed it silently`);
+          }
+        }
+
         state.status = 'paused';
         state.nextCheckAt = null;
+        // Drop the failure streak so a resume starts clean and the next failure
+        // opens a fresh incident with an honest startedAt.
+        state.consecutiveFailures = 0;
+        state.firstFailureAt = null;
         continue;
       }
 
       if (state.status === 'paused') state.status = 'pending';
-      if (!this.timers.has(monitor.id)) this.schedule(monitor, this.startupJitter(monitor));
+      if (this.running && !this.timers.has(monitor.id)) this.schedule(monitor, this.startupJitter(monitor));
     }
   }
 
