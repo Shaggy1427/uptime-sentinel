@@ -311,26 +311,22 @@ export function uptimeSinceAll(cutoffs: number[]): Map<number, UptimeStats[]> {
   const out = new Map<number, UptimeStats[]>();
   if (cutoffs.length === 0) return out;
 
-  // Placeholders bind in SQL text order: every column's cutoff first, then the
-  // widest one for the WHERE that bounds the scan.
   const columns: string[] = [];
-  const params: number[] = [];
+  const params: (number | string)[] = [];
   cutoffs.forEach((cutoff, i) => {
     columns.push(
-      `COUNT(*) FILTER (WHERE checked_at >= ?) AS t${i}`,
-      `COALESCE(SUM(ok) FILTER (WHERE checked_at >= ?), 0) AS u${i}`,
-      `AVG(CASE WHEN ok = 1 THEN latency_ms END) FILTER (WHERE checked_at >= ?) AS l${i}`,
+      `COUNT(*) FILTER (WHERE checked_at >= $${i * 3 + 1}) AS t${i}`,
+      `COALESCE(SUM(ok) FILTER (WHERE checked_at >= $${i * 3 + 2}), 0) AS u${i}`,
+      `AVG(CASE WHEN ok = 1 THEN latency_ms END) FILTER (WHERE checked_at >= $${i * 3 + 3}) AS l${i}`,
     );
     params.push(cutoff, cutoff, cutoff);
   });
   params.push(Math.min(...cutoffs));
 
-  const rows = db
-    .prepare(
-      `SELECT monitor_id, ${columns.join(', ')}
-       FROM checks WHERE checked_at >= ? GROUP BY monitor_id`,
-    )
-    .all(...params) as Row[];
+  const sql = `SELECT monitor_id, ${columns.join(', ')}
+               FROM checks WHERE checked_at >= $${params.length - 1} GROUP BY monitor_id`;
+
+  const rows = db.prepare(sql).all(...params) as Row[];
 
   for (const row of rows) {
     out.set(
@@ -352,7 +348,15 @@ export function uptimeSinceAll(cutoffs: number[]): Map<number, UptimeStats[]> {
 }
 
 export function pruneChecks(beforeMs: number): number {
-  return Number(db.prepare('DELETE FROM checks WHERE checked_at < ?').run(beforeMs).changes);
+  db.exec('BEGIN');
+  try {
+    const changes = Number(db.prepare('DELETE FROM checks WHERE checked_at < ?').run(beforeMs).changes);
+    db.exec('COMMIT');
+    return changes;
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
 }
 
 // ----------------------------------------------------------------- incidents

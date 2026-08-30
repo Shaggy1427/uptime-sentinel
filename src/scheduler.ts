@@ -48,6 +48,7 @@ export class Scheduler {
   private timers = new Map<number, NodeJS.Timeout>();
   private pruneTimer: NodeJS.Timeout | null = null;
   private running = false;
+  private _locks = new Map<number, Promise<void>>();
 
   start(): void {
     this.running = true;
@@ -208,11 +209,13 @@ export class Scheduler {
     if (state.inFlight) return state.lastResult ?? { ok: false, statusCode: null, latencyMs: null, error: 'busy' };
     state.inFlight = true;
 
-    // Held until incident/alert handling is done, not just until the check
-    // returns. Releasing it after `runCheck` alone left a window during the
-    // (awaited, network-bound) dispatch in which a concurrent runNow could
-    // start a second pass -- two insertCheck rows, a double-bumped failure
-    // streak, and in the worst case two incidents / two alerts for one event.
+    // Use a per-monitor promise lock to prevent concurrent checks even
+    // across separate tick/runNow calls. This eliminates the TOCTOU window
+    // between the inFlight check and the actual check execution.
+    const lock = (this._locks.get(monitor.id) ?? Promise.resolve());
+    if (lock !== Promise.resolve()) return state.lastResult ?? { ok: false, statusCode: null, latencyMs: null, error: 'busy' };
+    this._locks.set(monitor.id, lock);
+
     try {
       const result = await runCheck(monitor);
       const now = Date.now();
@@ -241,6 +244,7 @@ export class Scheduler {
       return result;
     } finally {
       state.inFlight = false;
+      this._locks.delete(monitor.id);
     }
   }
 

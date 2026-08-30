@@ -71,6 +71,8 @@ function describe(monitor: Monitor) {
 
   const parent = monitor.parentId === null ? null : store.getMonitor(monitor.parentId);
   const blockedById = state?.suppressedBy ?? null;
+  const descendants = store.descendantsOf(monitor.id);
+  const dependentCount = descendants.filter((m) => !m.paused).length;
 
   return {
     ...redact(monitor),
@@ -79,7 +81,7 @@ function describe(monitor: Monitor) {
     // Named so the dashboard can say what a monitor is waiting on rather than
     // just showing it greyed out for no visible reason.
     suppressedBy: blockedById === null ? null : (store.getMonitor(blockedById)?.name ?? null),
-    dependentCount: store.descendantsOf(monitor.id).filter((m) => !m.paused).length,
+    dependentCount,
     lastResult: state?.lastResult ?? null,
     lastCheckedAt: state?.lastCheckedAt ?? store.lastCheck(monitor.id)?.checkedAt ?? null,
     nextCheckAt: state?.nextCheckAt ?? null,
