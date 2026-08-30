@@ -218,3 +218,23 @@ test('a failure after resume opens a fresh incident, not the stale one', async (
   assert.notEqual(open.id, firstId, 'a new incident, not the stale one reopened');
   assert.equal(store.listIncidents(10, monitorId).length, 2);
 });
+
+test('a restart keeps an in-flight outage down even after retries was raised', async () => {
+  // Open an alerted incident with retries = 1 (beforeEach default).
+  await scheduler.runNow(monitorId); // 503 -> down, incident opens, DOWN alert
+  assert.ok(store.openIncidentFor(monitorId), 'incident is open');
+
+  // The operator raises retries while the outage is in flight, then the
+  // process restarts. rehydrate() restores the failure streak from
+  // incident.checksFailed (= 1), which is now below the new threshold.
+  store.updateMonitor(monitorId, { retries: 5 });
+  scheduler['rehydrate']();
+  assert.equal(scheduler.getState(monitorId)?.status, 'down');
+
+  // The next failing check must keep the monitor down and keep the incident
+  // moving -- not degrade it to 'pending' and stall the alerting.
+  await scheduler.runNow(monitorId);
+
+  assert.equal(scheduler.getState(monitorId)?.status, 'down', 'an open incident must not read as pending');
+  assert.equal(store.openIncidentFor(monitorId)!.checksFailed, 2, 'the failing check was counted');
+});
