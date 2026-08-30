@@ -18,10 +18,22 @@ function int(key: string, fallback: number, min?: number, max?: number): number 
 
 const dataDir = path.resolve(str('DATA_DIR', './data'));
 
+function isValidUrl(value: string): boolean {
+  try {
+    new URL(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export const config = {
   port: int('PORT', 8080, 1, 65_535),
   host: str('HOST', '0.0.0.0'),
-  publicUrl: str('PUBLIC_URL', '').replace(/\/+$/, ''),
+  publicUrl: (() => {
+    const v = str('PUBLIC_URL', '');
+    return v && !isValidUrl(v) ? '' : v.replace(/\/+$/, '');
+  })(),
   authPassword: str('AUTH_PASSWORD', ''),
   // Behind a reverse proxy, honour X-Forwarded-For so rate limits are keyed on
   // the real client rather than on the proxy. Only enable when a proxy you
