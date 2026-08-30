@@ -306,6 +306,13 @@ HTTP monitors additionally support a method, custom accepted status codes
 serving an error page"), keyword inversion, and ignoring TLS errors for
 self-signed certificates.
 
+**Redirects are not followed.** The `Location` of a 3xx is chosen by the remote
+server, not by you, so chasing it would let a compromised target point this
+monitor at anything the host can reach, and let a dead service look healthy by
+redirecting to one that isn't. An unfollowed 3xx is reported as down, naming
+where it pointed — unless you add that code to the accepted status list, which
+reads as "this URL moving is the healthy state".
+
 ## Configuration
 
 All configuration is environment variables. See [`.env.example`](.env.example).

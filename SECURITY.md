@@ -41,6 +41,14 @@ Two consequences follow, and both are intended behaviour rather than flaws:
 
 [readme]: README.md#security
 
+The requests it makes are still the ones the operator asked for. HTTP checks
+use `redirect: 'manual'` and do not follow 3xx responses: the `Location` is
+chosen by the target, not the person who created the monitor, so following it
+would both widen the request primitive to hosts nobody configured and let a
+redirect to an always-up page hide a real outage. An unfollowed redirect is
+reported as down unless its status code is in the monitor's accepted-status
+list. A redirect that *is* followed anyway is a vulnerability.
+
 So "I set no password, exposed it to the internet, and someone used it" is not a
 vulnerability report. "The password was set and I got in anyway" very much is.
 

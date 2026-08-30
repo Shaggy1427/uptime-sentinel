@@ -1,5 +1,5 @@
 import { parseAcceptedStatus } from './status.ts';
-import { BODY_CAP_BYTES, buildInit, describeFetchError, readBodyCapped } from './request.ts';
+import { BODY_CAP_BYTES, buildInit, describeFetchError, readBodyCapped, redirectOutcome } from './request.ts';
 import type { CheckResult, Monitor } from '../types.ts';
 
 export async function httpCheck(monitor: Monitor): Promise<CheckResult> {
@@ -9,6 +9,13 @@ export async function httpCheck(monitor: Monitor): Promise<CheckResult> {
   try {
     const res = await fetch(monitor.target, buildInit(monitor));
     const statusCode = res.status;
+
+    // A 3xx is never followed (see buildInit). Decide on it here, before the
+    // body is touched, so a redirect response can't feed the keyword match.
+    if (statusCode >= 300 && statusCode < 400) {
+      await res.body?.cancel().catch(() => {});
+      return redirectOutcome(statusCode, res.headers.get('location'), accepts, Math.round(performance.now() - started));
+    }
 
     let found = false;
     let truncated = false;
