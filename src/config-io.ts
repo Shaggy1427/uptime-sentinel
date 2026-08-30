@@ -271,13 +271,19 @@ function applyFields(prepared: Prepared[], report: ImportReport): Map<string, nu
 
 /** Pass two: resolve `parent` names now that every monitor in the file exists. */
 function applyParents(prepared: Prepared[], idByName: Map<string, number>, report: ImportReport): void {
-  const byName = groupByName(store.listMonitors());
+  const monitors = store.listMonitors();
+  const byName = groupByName(monitors);
+  const byId = new Map(monitors.map((m) => [m.id, m]));
 
   for (const entry of prepared) {
     const id = idByName.get(entry.name.toLowerCase());
     if (id === undefined) continue; // skipped as ambiguous in pass one
 
-    const current = store.getMonitor(id);
+    // Pass one never writes parentId and never renames an id, so the stored
+    // row fetched for the byName index above is current for existing
+    // monitors; only entries created in pass one are missing from it, and
+    // those fall back to a direct read.
+    const current = byId.get(id) ?? store.getMonitor(id);
     if (!current) continue;
 
     let parentId: number | null = null;
