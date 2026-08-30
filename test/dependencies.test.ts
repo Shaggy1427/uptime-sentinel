@@ -123,6 +123,19 @@ test('ancestorsOf terminates on a corrupt cycle instead of hanging', () => {
   assert.ok(store.descendantsOf(a.id).length <= 2);
 });
 
+test('descendantCountMap terminates on a corrupt cycle instead of hanging', () => {
+  // Same threat as ancestorsOf above: the API rejects cycles, but a
+  // hand-edited database must not wedge the /api/status poll in an
+  // infinite walk.
+  const a = make('CycleA');
+  const b = make('CycleB', a.id);
+  store.db.prepare('UPDATE monitors SET parent_id = ? WHERE id = ?').run(b.id, a.id);
+
+  const counts = store.descendantCountMap(store.listMonitors());
+  assert.equal(typeof counts.get(a.id), 'number');
+  assert.equal(typeof counts.get(b.id), 'number');
+});
+
 test('parentId survives a round trip through the database', () => {
   const host = make('Unraid');
   const child = make('Plex', host.id);
