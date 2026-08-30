@@ -131,12 +131,17 @@ export class Scheduler {
         // the first check after a resume computes downtime from the original
         // startedAt -- the whole paused span -- and emits a RECOVERED (or a
         // late DOWN) citing hours that were just the monitor sitting paused.
-        if (state.status === 'down') {
-          const incident = openIncidentFor(monitor.id);
-          if (incident) {
-            resolveIncident(incident.id, Date.now());
-            console.log(`[scheduler] "${monitor.name}" paused with an open incident; closed it silently`);
-          }
+        //
+        // Decided on the database, not the in-memory status: an incident can
+        // be open while the status is anything but 'down' -- handleUp leaves
+        // it open when every RECOVERED dispatch failed, and a monitor whose
+        // ancestor died mid-outage flips to 'suppressed' with the incident
+        // still open. Gating on state.status === 'down' left those incidents
+        // open across the pause.
+        const incident = openIncidentFor(monitor.id);
+        if (incident) {
+          resolveIncident(incident.id, Date.now());
+          console.log(`[scheduler] "${monitor.name}" paused with an open incident; closed it silently`);
         }
 
         state.status = 'paused';
