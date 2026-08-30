@@ -99,6 +99,20 @@ test('validateMonitor in partial mode allows a single field', () => {
   assert.deepEqual(validateMonitor({ paused: true }, { partial: true }), { paused: true });
 });
 
+test('boolean fields are validated by type, not truthiness', () => {
+  // "false", "0" and "no" are all truthy strings: Boolean() coercion turned
+  // each of them into paused: true, silently pausing the monitor.
+  for (const v of ['false', '0', 'no', 1, null]) {
+    assert.throws(
+      () => validateMonitor({ paused: v }, { partial: true }),
+      ValidationError,
+      `paused: ${JSON.stringify(v)} must be rejected`,
+    );
+  }
+  assert.throws(() => validateMonitor({ keywordInverted: 'false' }, { partial: true }), ValidationError);
+  assert.throws(() => validateMonitor({ ignoreTls: 1 }, { partial: true }), ValidationError);
+});
+
 test('validateMonitor defaults jsonOperator without clobbering a stored one', () => {
   // Create with no operator -> defaults to "exists".
   assert.equal(
