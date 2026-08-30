@@ -1,9 +1,21 @@
 import path from 'node:path';
-import { LIMITS } from './validate.ts';
+import { LIMITS, METHODS } from './validate.ts';
 
 function str(key: string, fallback: string): string {
   const v = process.env[key];
   return v === undefined || v === '' ? fallback : v;
+}
+
+/** An HTTP method, upper-cased. Falls back with a warning rather than letting an
+ *  unknown verb reach fetch(), where it throws every tick and silently disables
+ *  whatever it drives. */
+function method(key: string, fallback: string): string {
+  const v = str(key, fallback).toUpperCase();
+  if (!METHODS.includes(v)) {
+    console.warn(`[config] ${key}="${v}" is not a valid HTTP method; using ${fallback}`);
+    return fallback;
+  }
+  return v;
 }
 
 function int(key: string, fallback: number, min?: number, max?: number): number {
@@ -65,11 +77,14 @@ export const config = {
   },
 
   heartbeat: {
-    // Outbound dead-man's-switch. Empty disables it.
+    // Outbound dead-man's-switch. Empty disables it. The numeric bounds match
+    // the rest of config (see #14): 0 / negative would turn setInterval into a
+    // tight fetch loop against the third-party endpoint, and a 0 timeout aborts
+    // every ping so the switch silently never fires.
     url: str('HEARTBEAT_URL', ''),
-    intervalS: int('HEARTBEAT_INTERVAL_S', 60),
-    method: str('HEARTBEAT_METHOD', 'GET'),
-    timeoutMs: int('HEARTBEAT_TIMEOUT_MS', 10_000),
+    intervalS: int('HEARTBEAT_INTERVAL_S', 60, 10, LIMITS.intervalS.max),
+    method: method('HEARTBEAT_METHOD', 'GET'),
+    timeoutMs: int('HEARTBEAT_TIMEOUT_MS', 10_000, LIMITS.timeoutMs.min, LIMITS.timeoutMs.max),
   },
 
   defaults: {

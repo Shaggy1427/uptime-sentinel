@@ -14,7 +14,7 @@ import type { ValidateOptions } from './validate.ts';
 import { cookieSecret, secretEquals } from './secret.ts';
 import { renderMetrics } from './metrics.ts';
 import { exportConfig, importConfig } from './config-io.ts';
-import type { Monitor } from './types.ts';
+import type { Monitor, Incident, Check } from './types.ts';
 
 const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 
@@ -57,24 +57,66 @@ function parseId(value: string | undefined): number | null {
   return Number.isSafeInteger(n) && n > 0 ? n : null;
 }
 
-function describe(monitor: Monitor, all?: Monitor[]) {
-  // `all` lets /api/status resolve parent names and descendant counts against a
-  // single monitor list instead of one listMonitors() (a full table scan) per
-  // monitor -- otherwise describing N monitors is O(N^2) scans on every 10s poll.
-  const monitors = all ?? store.listMonitors();
-  const byId = new Map(monitors.map((m) => [m.id, m]));
+const ZERO_UPTIME: store.UptimeStats = { total: 0, up: 0, ratio: null, avgLatencyMs: null };
 
-  const state = scheduler.getState(monitor.id);
+/**
+ * Everything `describe` needs that would otherwise be a per-monitor query.
+ * `/api/status` builds this once (a fixed handful of queries) and threads it
+ * through, so describing N monitors on the 10s dashboard poll costs O(1) DB
+ * round-trips instead of ~6 per monitor.
+ */
+interface StatusContext {
+  now: number;
+  monitors: Monitor[];
+  byId: Map<number, Monitor>;
+  openIncidentByMonitor: Map<number, Incident>;
+  historyByMonitor: Map<number, Check[]>;
+  /** Per monitor: [day, week, month] uptime, in that order. */
+  uptimeByMonitor: Map<number, store.UptimeStats[]>;
+}
+
+/**
+ * A context scoped to one monitor, for `GET /api/monitors/:id`. That path
+ * describes a single monitor, so the per-monitor query count is irrelevant and
+ * the simple single-row helpers are fine here.
+ */
+function contextForOne(monitor: Monitor): StatusContext {
   const now = Date.now();
-  const incident = monitor.paused ? null : store.openIncidentFor(monitor.id);
-  const history = store.recentChecks(monitor.id, 40).map((c) => ({
-    ok: c.ok,
-    latencyMs: c.latencyMs,
-    checkedAt: c.checkedAt,
-  }));
+  const monitors = store.listMonitors();
+  const incident = store.openIncidentFor(monitor.id);
+
+  return {
+    now,
+    monitors,
+    byId: new Map(monitors.map((m) => [m.id, m])),
+    openIncidentByMonitor: incident ? new Map([[monitor.id, incident]]) : new Map(),
+    historyByMonitor: new Map([[monitor.id, store.recentChecks(monitor.id, 40)]]),
+    uptimeByMonitor: new Map([
+      [
+        monitor.id,
+        [
+          store.uptimeSince(monitor.id, now - DAY),
+          store.uptimeSince(monitor.id, now - 7 * DAY),
+          store.uptimeSince(monitor.id, now - 30 * DAY),
+        ],
+      ],
+    ]),
+  };
+}
+
+function describe(monitor: Monitor, ctx: StatusContext) {
+  const { byId, monitors, now } = ctx;
+  const state = scheduler.getState(monitor.id);
+  const incident = monitor.paused ? null : (ctx.openIncidentByMonitor.get(monitor.id) ?? null);
+
+  const checks = ctx.historyByMonitor.get(monitor.id) ?? [];
+  const history = checks.map((c) => ({ ok: c.ok, latencyMs: c.latencyMs, checkedAt: c.checkedAt }));
+  // checks are oldest-first, so the last one is the most recent overall.
+  const newestCheckAt = checks.length > 0 ? checks[checks.length - 1]!.checkedAt : null;
 
   const parent = monitor.parentId === null ? null : (byId.get(monitor.parentId) ?? null);
   const blockedById = state?.suppressedBy ?? null;
+  const [day, week, month] = ctx.uptimeByMonitor.get(monitor.id) ?? [];
 
   return {
     ...redact(monitor),
@@ -85,16 +127,16 @@ function describe(monitor: Monitor, all?: Monitor[]) {
     suppressedBy: blockedById === null ? null : (byId.get(blockedById)?.name ?? null),
     dependentCount: store.descendantsOf(monitor.id, monitors).filter((m) => !m.paused).length,
     lastResult: state?.lastResult ?? null,
-    lastCheckedAt: state?.lastCheckedAt ?? store.lastCheck(monitor.id)?.checkedAt ?? null,
+    lastCheckedAt: state?.lastCheckedAt ?? newestCheckAt,
     nextCheckAt: state?.nextCheckAt ?? null,
     downSinceMs: incident ? now - incident.startedAt : null,
     alerted: incident?.alertedAt !== null && incident !== null,
     incident,
     history,
     uptime: {
-      day: store.uptimeSince(monitor.id, now - DAY),
-      week: store.uptimeSince(monitor.id, now - 7 * DAY),
-      month: store.uptimeSince(monitor.id, now - 30 * DAY),
+      day: day ?? ZERO_UPTIME,
+      week: week ?? ZERO_UPTIME,
+      month: month ?? ZERO_UPTIME,
     },
   };
 }
@@ -257,11 +299,29 @@ export async function buildServer() {
   // -------------------------------------------------------------- monitors
 
   app.get('/api/status', async () => {
-    const all = store.listMonitors();
+    const monitors = store.listMonitors();
+    const now = Date.now();
+
+    const openIncidentByMonitor = new Map<number, Incident>();
+    for (const incident of store.listOpenIncidents()) {
+      // listOpenIncidents is newest-first, so the first per monitor is the one
+      // openIncidentFor would have returned.
+      if (!openIncidentByMonitor.has(incident.monitorId)) openIncidentByMonitor.set(incident.monitorId, incident);
+    }
+
+    const ctx: StatusContext = {
+      now,
+      monitors,
+      byId: new Map(monitors.map((m) => [m.id, m])),
+      openIncidentByMonitor,
+      historyByMonitor: store.recentChecksAll(40),
+      uptimeByMonitor: store.uptimeSinceAll([now - DAY, now - 7 * DAY, now - 30 * DAY]),
+    };
+
     return {
-      generatedAt: Date.now(),
+      generatedAt: now,
       notificationsConfigured: config.ntfy.topic !== '',
-      monitors: all.map((m) => describe(m, all)),
+      monitors: monitors.map((m) => describe(m, ctx)),
     };
   });
 
@@ -272,7 +332,7 @@ export async function buildServer() {
     if (id === null) return reply.code(400).send({ error: 'Invalid monitor id' });
     const monitor = store.getMonitor(id);
     if (!monitor) return reply.code(404).send({ error: 'Monitor not found' });
-    return describe(monitor);
+    return describe(monitor, contextForOne(monitor));
   });
 
   app.post('/api/monitors', async (req, reply) => {

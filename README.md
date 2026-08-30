@@ -223,6 +223,11 @@ file (uncomment the mount in `docker-compose.yml`), or point `MONITORS_FILE` at
 one. See [`monitors.example.json`](monitors.example.json) for the shape. This
 only runs against an empty database — after that, the UI is the source of truth.
 
+To express [dependencies](#dependencies) in the file, give an entry
+`"parent": "<name of another entry>"` (order in the file does not matter). A
+`parent` that names nothing, or a reference that would form a loop, is reported
+and the monitor is still created — just unlinked.
+
 ## Dependencies
 
 When your Unraid box goes down, every monitor pointed at it fails at the same
