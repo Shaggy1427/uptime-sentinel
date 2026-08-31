@@ -24,22 +24,34 @@ export function parsePath(path: string): Segment[] {
   // Matches either a bare key, or a [...] accessor.
   const token = /([^.[\]]+)|\[(\*|\d+)\]/g;
   let consumed = 0;
+  let prevWasBracket = false;
   let m: RegExpExecArray | null;
 
   while ((m = token.exec(trimmed)) !== null) {
     // Reject anything the tokeniser skipped over, so typos fail loudly rather
-    // than silently matching a different path.
+    // than silently matching a different path. Tokens are separated by exactly
+    // one dot, except that a bracket accessor may follow a key directly
+    // ("a[0]"). Anything else -- a doubled dot, a stray "]", a missing dot
+    // after "]" -- must fail, not be read as the path you did not type.
     if (m.index > consumed) {
       const skipped = trimmed.slice(consumed, m.index);
-      if (!/^[.\]]*$/.test(skipped)) throw new PathError(`Unexpected "${skipped}" in path`);
+      if (skipped !== '.') throw new PathError(`Unexpected "${skipped}" in path`);
+    } else if (prevWasBracket && m[1] !== undefined) {
+      throw new PathError(`Missing "." after "]" in path`);
     }
     consumed = token.lastIndex;
+    prevWasBracket = m[1] === undefined;
 
     if (m[1] !== undefined) segments.push({ kind: 'key', key: m[1] });
     else if (m[2] === '*') segments.push({ kind: 'all' });
     else segments.push({ kind: 'index', index: Number.parseInt(m[2]!, 10) });
   }
 
+  // Trailing junk the tokeniser never matched ("state]", "disks[*]x") must
+  // not silently shorten the path to whatever came before it.
+  if (consumed < trimmed.length) {
+    throw new PathError(`Unexpected "${trimmed.slice(consumed)}" in path`);
+  }
   if (segments.length === 0) throw new PathError(`Could not read the path "${path}"`);
   return segments;
 }
