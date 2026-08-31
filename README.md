@@ -33,6 +33,7 @@ state, uptime and incident history. No config files are required after setup.
 - [Monitor types](#monitor-types)
 - [Monitor fields](#monitor-fields)
 - [Dependencies](#dependencies)
+- [Notification channels](#notification-channels)
 - [Maintenance windows](#maintenance-windows)
 - [The alert state machine](#the-alert-state-machine)
 - [Environment variables](#environment-variables)
@@ -748,6 +749,85 @@ Dependencies nest to any depth. The rules:
 
 ---
 
+## Notification channels
+
+A channel is a place alerts go. They are records, not environment variables,
+which is what makes **two of the same kind** possible — a loud ntfy topic your
+phone wakes for and a quiet one it does not, both configured and managed
+separately.
+
+| Type | What it needs |
+|------|---------------|
+| `ntfy` | Server (default `https://ntfy.sh`), topic, optional access token, per-kind priorities |
+| `discord` | Webhook URL, optional display name |
+
+Manage them under **Channels** in the dashboard, or through
+[`/api/channels`](#endpoints).
+
+### Which channels a monitor uses
+
+Each monitor either names the channels it wants, or names none and uses
+whichever channels are marked **default**.
+
+```
+Critical DB   →  loud            (named explicitly)
+Routine job   →  quiet           (named nothing; quiet is the default)
+```
+
+That fallback is the whole reason nothing broke when this arrived: every
+monitor that existed before channels did names nothing, so they all keep
+reaching the default.
+
+Three rules are worth knowing, because each one is a decision rather than an
+accident:
+
+- **Naming a channel replaces the defaults, it does not add to them.** Picking
+  "loud" means loud *instead of* the default, not as well as.
+- **Switching a channel off silences what it carried.** Its monitors do not
+  fall back to the defaults — rerouting alerts to somewhere you did not choose
+  would be a surprise, not a kindness.
+- **Deleting a channel returns its monitors to the defaults**, because they
+  now name nothing.
+
+A monitor that reaches no channel is called out on its card and in the log,
+rather than just going quiet:
+
+```
+[notify] "Critical DB" is routed to no enabled channel - down alert dropped
+```
+
+That distinction matters. "Nothing is configured" is a choice; "this monitor
+reaches nothing" is a mistake, and the two used to look identical.
+
+### Credentials are write-only
+
+An ntfy token and a Discord webhook URL are both credentials — anyone holding
+the webhook URL can post to the channel. They follow the same rule as monitor
+request headers: the API returns them as `<redacted>`, and sending that
+placeholder back means "leave it as it is", so opening the editor and pressing
+save cannot overwrite a working token with the literal string.
+
+`GET /api/config/export` withholds them too, unless you ask with
+`?includeSecrets=true`. An export that withheld a credential records which key
+it held back, and re-importing that file keeps the stored credential rather
+than blanking it.
+
+### Upgrading from the `NTFY_*` variables
+
+Alerting used to be configured entirely by `NTFY_TOPIC` and friends. On the
+first start after upgrading, those values are copied into a channel named
+`ntfy`, marked default, and everything routes to it exactly as before — no
+action required.
+
+After that the environment variables are inert: **edit the channel, not
+`.env`**. They are read once more only if you start a database that has never
+had the channels table, so a fresh install still comes up able to alert.
+
+They are not re-applied if you delete every channel. Deleting them all means
+you want silence, and re-creating one on the next restart would be its own bug.
+
+---
+
 ## Maintenance windows
 
 Planned downtime is not an outage, and it should not read like one. A
@@ -1036,13 +1116,20 @@ curl -H 'Authorization: Bearer your-dashboard-password' \
 | `DELETE` | `/api/monitors/:id` | required | global | `204`. Cascades to its checks and incidents; children are orphaned, not deleted |
 | `POST` | `/api/monitors/:id/check` | required | **30 per minute** | Run a check right now and return its `CheckResult` |
 | `GET` | `/api/monitors/:id/checks` | required | global | Raw check rows, oldest-first. `?limit=` default 200, max 1000 |
+| `GET` | `/api/channels` | required | global | Every notification channel, credentials redacted |
+| `POST` | `/api/channels` | required | global | Create one. `201` with the created channel |
+| `GET` | `/api/channels/:id` | required | global | One channel, credentials redacted |
+| `PATCH` | `/api/channels/:id` | required | global | Merge onto the stored channel; a redacted secret sent back is kept |
+| `DELETE` | `/api/channels/:id` | required | global | `204`. Its monitors fall back to the defaults |
+| `GET` | `/api/monitors/:id/channels` | required | global | `{ "channelIds": [...] }`. Empty means "use the defaults" |
+| `PUT` | `/api/monitors/:id/channels` | required | global | Replace a monitor's routing. An unknown id is a 400, not a silent drop |
 | `GET` | `/api/maintenance` | required | global | Every maintenance window, with the monitor ids it covers |
 | `POST` | `/api/maintenance` | required | global | Create one. `201` with the created window |
 | `GET` | `/api/maintenance/:id` | required | global | One window |
 | `PATCH` | `/api/maintenance/:id` | required | global | Merge onto the stored window; a strategy change needs that strategy's fields |
 | `DELETE` | `/api/maintenance/:id` | required | global | `204`. The checks it covered keep their history and start counting again |
 | `GET` | `/api/incidents` | required | global | Incident history with `monitorName` attached. `?limit=` default 50, max 500; `?monitorId=` filters |
-| `POST` | `/api/test-notification` | required | global | Send a test push. Optional body `{ "monitorId": n }` |
+| `POST` | `/api/test-notification` | required | global | Send a test push. Optional body `{ "monitorId": n }` to use that monitor's routing, or `{ "channelId": n }` to test one channel — which works even while it is switched off |
 | `GET` | `/api/config/export` | required | global | Every monitor as a portable JSON file. `?includeSecrets=true` includes header values |
 | `POST` | `/api/config/import` | required | **30 per minute** | Merge a config file in. `?dryRun=true` previews without writing |
 | `GET` | `/metrics` | required | global | Prometheus text exposition, `version=0.0.4` |

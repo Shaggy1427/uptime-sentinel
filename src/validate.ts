@@ -3,7 +3,18 @@ import { parseHostPort } from './checks/tcp.ts';
 import { OPERATORS, isOperator } from './checks/assert.ts';
 import { parsePath, PathError } from './checks/jsonpath.ts';
 import { isValidTimezone } from './maintenance.ts';
-import type { MaintenanceInput, MaintenanceWindow, Monitor, MonitorInput, MonitorType } from './types.ts';
+import { CHANNEL_SCHEMA, CHANNEL_TYPES, isChannelType, REDACTED } from './notify/schema.ts';
+import type {
+  ChannelConfig,
+  ChannelInput,
+  ChannelType,
+  MaintenanceInput,
+  MaintenanceWindow,
+  Monitor,
+  MonitorInput,
+  MonitorType,
+  NotificationChannel,
+} from './types.ts';
 
 const TYPES: MonitorType[] = ['http', 'tcp', 'ping', 'json'];
 export const METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'];
@@ -386,4 +397,127 @@ export function validateMaintenance(
   if (weekdays === undefined) throw new ValidationError('weekdays is required for a weekly window');
 
   return { ...common, strategy: 'weekly', startMin, durationS, weekdays };
+}
+
+// -------------------------------------------------------------- channels
+
+export interface ValidateChannelOptions {
+  partial: boolean;
+  /** The stored channel on PATCH, so a partial body still yields a whole shape. */
+  current?: NotificationChannel;
+}
+
+/**
+ * Validate one channel's config against its type's schema.
+ *
+ * Secrets follow the same rule monitor request headers do: the API hands them
+ * out as `<redacted>`, and a save that echoes that placeholder back means
+ * "leave it as it was". Without that, opening the channel editor and pressing
+ * save would overwrite a working token with the literal string `<redacted>`.
+ */
+function validateChannelConfig(
+  type: ChannelType,
+  raw: unknown,
+  current: NotificationChannel | undefined,
+): ChannelConfig {
+  if (raw !== undefined && (typeof raw !== 'object' || raw === null || Array.isArray(raw))) {
+    throw new ValidationError('config must be an object');
+  }
+
+  const submitted = (raw ?? {}) as Record<string, unknown>;
+  // Only carry a stored value forward when the type still matches; switching a
+  // channel from ntfy to discord must not inherit a topic as a webhook.
+  const stored = current?.type === type ? current.config : {};
+  const out: ChannelConfig = {};
+
+  for (const spec of CHANNEL_SCHEMA[type]) {
+    const has = spec.key in submitted && submitted[spec.key] !== undefined;
+    let value: unknown = has ? submitted[spec.key] : stored[spec.key];
+
+    if (spec.secret && value === REDACTED) value = stored[spec.key];
+
+    if (value === undefined || value === null || value === '') {
+      if (spec.required) throw new ValidationError(`${spec.key} is required for a ${type} channel`);
+      continue;
+    }
+
+    if (spec.kind === 'int') {
+      out[spec.key] = num(value, spec.key, spec.min ?? 0, spec.max ?? Number.MAX_SAFE_INTEGER);
+      continue;
+    }
+
+    const text = String(value).trim();
+    if (text === '') {
+      if (spec.required) throw new ValidationError(`${spec.key} is required for a ${type} channel`);
+      continue;
+    }
+    if (text.length > 2048) throw new ValidationError(`${spec.key} must be 2048 characters or fewer`);
+
+    if (spec.kind === 'url') {
+      let parsed: URL;
+      try {
+        parsed = new URL(text);
+      } catch {
+        throw new ValidationError(`${spec.key} must be a valid URL`);
+      }
+      // The same restriction the monitor targets and PUBLIC_URL carry: these
+      // values are fetched, and a non-http scheme reaching fetch() throws on
+      // every alert rather than failing once, visibly, here.
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        throw new ValidationError(`${spec.key} must be an http(s) URL`);
+      }
+      out[spec.key] = text.replace(/\/+$/, '');
+      continue;
+    }
+
+    out[spec.key] = text;
+  }
+
+  // Unknown keys are dropped rather than stored: the config is read back
+  // through the schema, so anything else is dead weight that survives forever.
+  return out;
+}
+
+export function validateChannel(input: unknown, { partial, current }: ValidateChannelOptions): ChannelInput {
+  if (typeof input !== 'object' || input === null) throw new ValidationError('Body must be an object');
+  const raw = input as Record<string, unknown>;
+  const has = (k: string) => k in raw && raw[k] !== undefined;
+
+  if (partial && !current) throw new ValidationError('Cannot patch a channel that does not exist');
+
+  let name: string;
+  if (has('name')) {
+    name = String(raw.name).trim();
+    if (!name) throw new ValidationError('name is required');
+    if (name.length > 120) throw new ValidationError('name must be 120 characters or fewer');
+  } else if (current) {
+    name = current.name;
+  } else {
+    throw new ValidationError('name is required');
+  }
+
+  let type: ChannelType;
+  if (has('type')) {
+    const value = String(raw.type);
+    if (!isChannelType(value)) throw new ValidationError(`type must be one of ${CHANNEL_TYPES.join(', ')}`);
+    type = value;
+  } else if (current) {
+    type = current.type;
+  } else {
+    throw new ValidationError('type is required');
+  }
+
+  const flag = (key: string, fallback: boolean): boolean => {
+    if (!has(key)) return current ? (current[key as 'enabled' | 'isDefault'] ?? fallback) : fallback;
+    if (typeof raw[key] !== 'boolean') throw new ValidationError(`${key} must be a boolean`);
+    return raw[key] as boolean;
+  };
+
+  return {
+    name,
+    type,
+    config: validateChannelConfig(type, raw.config, current),
+    enabled: flag('enabled', true),
+    isDefault: flag('isDefault', false),
+  };
 }

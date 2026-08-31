@@ -9,7 +9,10 @@ process.env.DATA_DIR = tmp;
 process.env.NTFY_TOPIC = 'test-topic';
 process.env.AUTH_PASSWORD = '';
 
-const { ntfyChannel } = await import('../src/notify/ntfy.ts');
+const { ntfyType } = await import('../src/notify/ntfy.ts');
+
+/** Settings arrive per call now rather than from NTFY_* at module load. */
+const NTFY_CONFIG = { url: 'https://ntfy.example', topic: 'test-topic' };
 
 const testEvent = {
   kind: 'test',
@@ -18,7 +21,7 @@ const testEvent = {
   downForMs: null,
   incident: null,
   at: Date.now(),
-} as Parameters<typeof ntfyChannel.send>[0];
+} as Parameters<typeof ntfyType.send>[1];
 
 test('a successful ntfy send releases the response body', async () => {
   const originalFetch = globalThis.fetch;
@@ -35,7 +38,7 @@ test('a successful ntfy send releases the response body', async () => {
     );
 
   try {
-    await ntfyChannel.send(testEvent);
+    await ntfyType.send(NTFY_CONFIG, testEvent);
     assert.equal(cancelled, true);
   } finally {
     globalThis.fetch = originalFetch;
@@ -52,7 +55,7 @@ test('an ntfy body strips injected line and terminal controls', async () => {
   };
 
   try {
-    await ntfyChannel.send({
+    await ntfyType.send(NTFY_CONFIG, {
       ...testEvent,
       kind: 'down',
       reason: 'failed\n[FAKE]\r\x1B[31m',
@@ -86,7 +89,7 @@ test('an ntfy error response is capped and released', async () => {
     );
 
   try {
-    await assert.rejects(() => ntfyChannel.send(testEvent), /ntfy responded 500: x+/);
+    await assert.rejects(() => ntfyType.send(NTFY_CONFIG, testEvent), /ntfy responded 500: x+/);
     assert.ok(pulls < 10, `read ${pulls} chunks from an unbounded response`);
     assert.equal(cancelled, true);
   } finally {

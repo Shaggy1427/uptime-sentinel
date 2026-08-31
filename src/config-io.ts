@@ -1,6 +1,14 @@
 import * as store from './db.ts';
-import { validateMaintenance, validateMonitor, ValidationError } from './validate.ts';
-import type { MaintenanceInput, MaintenanceWindow, Monitor, MonitorInput } from './types.ts';
+import { validateChannel, validateMaintenance, validateMonitor, ValidationError } from './validate.ts';
+import { secretKeys } from './notify/schema.ts';
+import type {
+  ChannelInput,
+  MaintenanceInput,
+  MaintenanceWindow,
+  Monitor,
+  MonitorInput,
+  NotificationChannel,
+} from './types.ts';
 
 /** Bumped only if the shape changes incompatibly. Import accepts anything it understands. */
 export const CONFIG_VERSION = 1;
@@ -39,6 +47,14 @@ export interface ExportedMonitor {
   jsonExpected: string | null;
   parent: string | null;
   paused: boolean;
+  /**
+   * Channels this monitor routes to, by name.
+   *
+   * Null means it named none and therefore uses the defaults -- which is a
+   * different statement from an empty array, and the difference survives the
+   * round trip because it decides whether the defaults apply.
+   */
+  channels?: string[] | null;
 }
 
 /**
@@ -62,6 +78,23 @@ export interface ExportedMaintenance {
   monitors: string[];
 }
 
+/**
+ * A channel as it appears in an exported file.
+ *
+ * Credentials are withheld exactly as monitor header values are, and for the
+ * same reason: the ordinary export is a file you can paste into an issue.
+ * `configRedacted` names the keys that were held back, so the reader can tell
+ * "this channel needs a token" from "this channel needs nothing".
+ */
+export interface ExportedChannel {
+  name: string;
+  type: string;
+  config: Record<string, string | number>;
+  configRedacted?: string[];
+  enabled: boolean;
+  isDefault: boolean;
+}
+
 export interface ConfigFile {
   version: number;
   exportedAt: number;
@@ -71,6 +104,8 @@ export interface ConfigFile {
    * file, still imports cleanly.
    */
   maintenance?: ExportedMaintenance[];
+  /** Optional for the same reason; a file without them changes no routing. */
+  channels?: ExportedChannel[];
 }
 
 export interface ImportReport {
@@ -85,6 +120,12 @@ export interface ImportReport {
   maintenanceCreated: string[];
   /** Maintenance windows the import rewrote, by name. */
   maintenanceUpdated: string[];
+  /** Notification channels added by this import, by name. */
+  channelsCreated: string[];
+  /** Notification channels the import rewrote, by name. */
+  channelsUpdated: string[];
+  /** Channels that will have no credentials, because the file did not carry them. */
+  channelsNeedCredentials: string[];
   errors: string[];
 }
 
@@ -150,14 +191,52 @@ function toExportedMaintenance(window: MaintenanceWindow, nameById: Map<number, 
       };
 }
 
+function toExportedChannel(channel: NotificationChannel, includeSecrets: boolean): ExportedChannel {
+  const secrets = secretKeys(channel.type);
+  const config: Record<string, string | number> = {};
+  const withheld: string[] = [];
+
+  for (const [key, value] of Object.entries(channel.config)) {
+    if (!includeSecrets && secrets.includes(key)) {
+      withheld.push(key);
+      continue;
+    }
+    config[key] = value;
+  }
+
+  const out: ExportedChannel = {
+    name: channel.name,
+    type: channel.type,
+    config,
+    enabled: channel.enabled,
+    isDefault: channel.isDefault,
+  };
+  if (withheld.length > 0) out.configRedacted = withheld;
+  return out;
+}
+
 export function exportConfig({ includeSecrets = false }: { includeSecrets?: boolean } = {}): ConfigFile {
   const monitors = store.listMonitors();
   const nameById = new Map(monitors.map((m) => [m.id, m.name]));
+  const channelNameById = new Map(store.listChannels().map((c) => [c.id, c.name]));
+
   return {
     version: CONFIG_VERSION,
     exportedAt: Date.now(),
-    monitors: monitors.map((m) => toExported(m, nameById, includeSecrets)),
+    monitors: monitors.map((m) => {
+      const exported = toExported(m, nameById, includeSecrets);
+      const chosen = store.monitorChannelIds(m.id);
+      // Null, not [], when the monitor named nothing: the two mean different
+      // things on import, and flattening them would silently move every
+      // monitor off the defaults.
+      exported.channels =
+        chosen.length === 0
+          ? null
+          : chosen.map((id) => channelNameById.get(id)).filter((n): n is string => n !== undefined);
+      return exported;
+    }),
     maintenance: store.listMaintenance().map((w) => toExportedMaintenance(w, nameById)),
+    channels: store.listChannels().map((c) => toExportedChannel(c, includeSecrets)),
   };
 }
 
@@ -180,6 +259,8 @@ interface Prepared {
   input: Partial<MonitorInput>;
   parent: string | null;
   redactedHeaderNames: string[];
+  /** Channel names this monitor routes to; null means "use the defaults". */
+  channels: string[] | null;
 }
 
 function groupByName(monitors: Monitor[]): Map<string, Monitor[]> {
@@ -234,7 +315,7 @@ function prepare(entries: unknown[], errors: string[]): Prepared[] {
       return;
     }
 
-    const { parent, headersRedacted, parentId, ...fields } = entry as Record<string, unknown>;
+    const { parent, headersRedacted, parentId, channels, ...fields } = entry as Record<string, unknown>;
 
     // An id from another install means nothing here, and silently honouring it
     // would attach the monitor to whatever happens to hold that id.
@@ -264,12 +345,22 @@ function prepare(entries: unknown[], errors: string[]): Prepared[] {
     }
     seenNames.set(key, position);
 
+    let routedTo: string[] | null = null;
+    if (channels !== undefined && channels !== null) {
+      if (!Array.isArray(channels) || channels.some((c) => typeof c !== 'string')) {
+        errors.push(`${label(fields.name)}: "channels" must be an array of channel names`);
+        return;
+      }
+      routedTo = channels as string[];
+    }
+
     prepared.push({
       position,
       name,
       input,
       parent: typeof parent === 'string' && parent.trim() !== '' ? parent.trim() : null,
       redactedHeaderNames: Array.isArray(headersRedacted) ? headersRedacted.filter((h) => typeof h === 'string') : [],
+      channels: routedTo,
     });
   });
 
@@ -535,6 +626,156 @@ function applyMaintenance(prepared: PreparedWindow[], idByName: Map<string, numb
   }
 }
 
+interface PreparedChannel {
+  name: string;
+  input: ChannelInput;
+  /** Secret keys the file said it withheld, so the report can name them. */
+  withheld: string[];
+}
+
+function channelEntriesOf(payload: unknown): unknown[] {
+  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) return [];
+  const channels = (payload as { channels?: unknown }).channels;
+  if (channels === undefined || channels === null) return [];
+  if (!Array.isArray(channels)) throw new ValidationError('"channels" must be an array');
+  return channels;
+}
+
+function prepareChannels(entries: unknown[], errors: string[]): PreparedChannel[] {
+  const prepared: PreparedChannel[] = [];
+
+  entries.forEach((entry, i) => {
+    const position = i + 1;
+    const label = (name?: unknown) =>
+      typeof name === 'string' && name.trim() !== ''
+        ? `channel entry ${position} ("${name.trim()}")`
+        : `channel entry ${position}`;
+
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+      errors.push(`${label()}: must be a JSON object`);
+      return;
+    }
+
+    const { configRedacted, ...fields } = entry as Record<string, unknown>;
+    const withheld = Array.isArray(configRedacted)
+      ? configRedacted.filter((k): k is string => typeof k === 'string')
+      : [];
+
+    try {
+      prepared.push({
+        name: String(fields.name ?? '').trim(),
+        input: validateChannel(fields, { partial: false }),
+        withheld,
+      });
+    } catch (err) {
+      if (err instanceof ValidationError) errors.push(`${label(fields.name)}: ${err.message}`);
+      else throw err;
+    }
+  });
+
+  return prepared;
+}
+
+/**
+ * Create or replace each channel, merging by name the way monitors do.
+ *
+ * Returns name -> id so the monitor pass can resolve routing. A redacted file
+ * carries a channel without its token; rather than writing an empty
+ * credential over a working one, the stored config is kept and the channel is
+ * reported as needing attention -- the same rule monitor headers follow.
+ */
+function applyChannels(prepared: PreparedChannel[], report: ImportReport): Map<string, number> {
+  const idByName = new Map<string, number>();
+
+  const existingByName = new Map<string, NotificationChannel[]>();
+  for (const channel of store.listChannels()) {
+    const key = channel.name.toLowerCase();
+    const list = existingByName.get(key);
+    if (list) list.push(channel);
+    else existingByName.set(key, [channel]);
+  }
+
+  for (const entry of prepared) {
+    const key = entry.name.toLowerCase();
+    const matches = existingByName.get(key) ?? [];
+    if (matches.length > 1) {
+      report.skipped.push({ name: entry.name, reason: `matches ${matches.length} existing channels` });
+      continue;
+    }
+
+    const target = matches[0] ?? null;
+    let input = entry.input;
+
+    if (entry.withheld.length > 0) {
+      if (target && target.type === entry.input.type) {
+        // Keep whatever is already stored for the keys the file withheld.
+        const merged = { ...entry.input.config };
+        for (const secret of entry.withheld) {
+          const stored = target.config[secret];
+          if (stored !== undefined) merged[secret] = stored;
+        }
+        input = { ...entry.input, config: merged };
+      } else {
+        report.channelsNeedCredentials.push(entry.name);
+      }
+    }
+
+    if (target) {
+      store.updateChannel(target.id, input);
+      report.channelsUpdated.push(entry.name);
+      idByName.set(key, target.id);
+    } else {
+      const created = store.createChannel(input);
+      report.channelsCreated.push(entry.name);
+      idByName.set(key, created.id);
+    }
+  }
+
+  // Channels already here but not in the file stay routable by name.
+  for (const [key, list] of existingByName) {
+    if (!idByName.has(key) && list.length === 1) idByName.set(key, list[0]!.id);
+  }
+
+  return idByName;
+}
+
+/** Point each imported monitor at the channels it named. */
+function applyRouting(
+  prepared: Prepared[],
+  monitorIdByName: Map<string, number>,
+  channelIdByName: Map<string, number>,
+  report: ImportReport,
+): void {
+  for (const entry of prepared) {
+    // Absent means the file says nothing about routing, which must leave any
+    // existing assignment alone rather than resetting it to the defaults.
+    if (entry.channels === null) continue;
+
+    const monitorId = monitorIdByName.get(entry.name.toLowerCase());
+    if (monitorId === undefined) continue;
+
+    const ids: number[] = [];
+    let missing: string | null = null;
+    for (const name of entry.channels) {
+      const id = channelIdByName.get(name.toLowerCase());
+      if (id === undefined) {
+        missing = name;
+        break;
+      }
+      ids.push(id);
+    }
+
+    // Refused rather than trimmed: routing a monitor to fewer channels than
+    // the file says is how an alert silently stops arriving.
+    if (missing !== null) {
+      report.errors.push(`"${entry.name}": no channel named "${missing}"`);
+      continue;
+    }
+
+    store.setMonitorChannels(monitorId, ids);
+  }
+}
+
 export function importConfig(payload: unknown, { dryRun = false }: { dryRun?: boolean } = {}): ImportReport {
   const entries = entriesOf(payload);
 
@@ -547,16 +788,23 @@ export function importConfig(payload: unknown, { dryRun = false }: { dryRun?: bo
     needCredentials: [],
     maintenanceCreated: [],
     maintenanceUpdated: [],
+    channelsCreated: [],
+    channelsUpdated: [],
+    channelsNeedCredentials: [],
     errors: [],
   };
 
   const prepared = prepare(entries, report.errors);
   const preparedWindows = prepareMaintenance(maintenanceEntriesOf(payload), report.errors);
+  const preparedChannels = prepareChannels(channelEntriesOf(payload), report.errors);
   if (report.errors.length > 0) return report;
 
   return store.transaction(() => {
+    // Channels first: monitors name the ones they route to.
+    const channelIdByName = applyChannels(preparedChannels, report);
     const idByName = applyFields(prepared, report);
     applyParents(prepared, idByName, report);
+    applyRouting(prepared, idByName, channelIdByName, report);
     // After the monitors, because a window names the monitors it covers and
     // those may be created by this same file.
     applyMaintenance(preparedWindows, idByName, report);
@@ -572,6 +820,9 @@ export function importConfig(payload: unknown, { dryRun = false }: { dryRun?: bo
       report.needCredentials = [];
       report.maintenanceCreated = [];
       report.maintenanceUpdated = [];
+      report.channelsCreated = [];
+      report.channelsUpdated = [];
+      report.channelsNeedCredentials = [];
     }
     return { commit: clean && !dryRun, value: report };
   });

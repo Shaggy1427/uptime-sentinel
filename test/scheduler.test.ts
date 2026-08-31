@@ -15,25 +15,44 @@ process.env.AUTH_PASSWORD = '';
 // itself and asserts on the database.
 const { scheduler } = await import('../src/scheduler.ts');
 const store = await import('../src/db.ts');
-const { channels } = await import('../src/notify/index.ts');
 import type { NotificationEvent } from '../src/notify/types.ts';
 
-// A stand-in notification channel we can break, block, and restore at will.
+// A real ntfy endpoint we can break, block and restore at will.
+//
+// Alerts route through stored channel rows now, so there is no module-level
+// array to push a stand-in object into -- and that is an improvement here:
+// driving the genuine ntfy channel against a local server exercises the whole
+// path (routing, dispatch, the channel implementation, HTTP) instead of a seam
+// that only proves the scheduler called something.
 let deliver = true;
 let block: Promise<void> | null = null;
 const sent: NotificationEvent['kind'][] = [];
 const attempts: NotificationEvent['kind'][] = [];
 
-channels.length = 0;
-channels.push({
-  name: 'fake',
-  enabled: () => true,
-  async send(event) {
-    attempts.push(event.kind);
-    if (block) await block;
-    if (!deliver) throw new Error('channel down');
-    sent.push(event.kind);
-  },
+/** Recover the event kind from the title the channel actually sent. */
+function kindOf(title: string): NotificationEvent['kind'] {
+  if (title.startsWith('STILL DOWN:')) return 'still-down';
+  if (title.startsWith('DOWN:')) return 'down';
+  if (title.startsWith('RECOVERED:')) return 'up';
+  return 'test';
+}
+
+const ntfyServer = http.createServer(async (req, res) => {
+  const kind = kindOf(String(req.headers.title ?? ''));
+  attempts.push(kind);
+  req.resume();
+  if (block) await block;
+  if (!deliver) {
+    res.writeHead(500);
+    res.end('channel down');
+    return;
+  }
+  sent.push(kind);
+  res.writeHead(200);
+  res.end();
+});
+const ntfyPort = await new Promise<number>((resolve) => {
+  ntfyServer.listen(0, '127.0.0.1', () => resolve((ntfyServer.address() as { port: number }).port));
 });
 
 // Target whose status code the test flips between 503 and 200.
@@ -54,11 +73,22 @@ let monitorId = 0;
 
 after(async () => {
   await new Promise((r) => origin.close(r));
+  await new Promise((r) => ntfyServer.close(r));
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
 beforeEach(() => {
   for (const m of store.listMonitors()) store.deleteMonitor(m.id);
+  for (const c of store.listChannels()) store.deleteChannel(c.id);
+  // Default, so monitors reach it without naming it -- the state every
+  // monitor is in until someone assigns channels explicitly.
+  store.createChannel({
+    name: 'fake',
+    type: 'ntfy',
+    config: { url: `http://127.0.0.1:${ntfyPort}`, topic: 'sched' },
+    enabled: true,
+    isDefault: true,
+  });
   sent.length = 0;
   attempts.length = 0;
   deliver = true;

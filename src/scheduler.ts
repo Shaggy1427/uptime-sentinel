@@ -14,10 +14,13 @@ import {
   pruneChecks,
   resolveIncident,
   rulesCovering,
+  anyChannelEnabled,
+  channelsFor,
   db,
 } from './db.ts';
 import { runCheck } from './checks/index.ts';
 import { dispatch } from './notify/index.ts';
+import type { DispatchOutcome, NotificationEvent } from './notify/index.ts';
 import { config } from './config.ts';
 import { openRule } from './maintenance.ts';
 import { explain, policyFor } from './suppression.ts';
@@ -275,6 +278,17 @@ export class Scheduler {
   }
 
   /**
+   * Send an event to whatever this monitor is routed to.
+   *
+   * The routing lookup lives here rather than inside `dispatch` so the notify
+   * layer keeps knowing nothing about storage, and so all three alert paths
+   * resolve channels identically instead of each growing their own rule.
+   */
+  private async notify(event: NotificationEvent): Promise<DispatchOutcome> {
+    return dispatch(event, channelsFor(event.monitor.id), anyChannelEnabled());
+  }
+
+  /**
    * Names of the monitors this one is standing in for, for a grouped alert.
    *
    * `monitors` is the snapshot the caller already holds; without it this
@@ -487,7 +501,7 @@ export class Scheduler {
       return;
     }
 
-    const results = await dispatch({
+    const outcome = await this.notify({
       kind: 'up',
       monitor,
       incident: { ...incident, resolvedAt: now },
@@ -502,7 +516,11 @@ export class Scheduler {
     // leave it open so the next successful check retries -- otherwise a
     // transient ntfy outage leaves the operator's last signal reading "DOWN"
     // for a service that is fine, with no reminder to correct it.
-    if (results.length === 0 || results.some((r) => r.ok)) {
+    // An empty result closes the incident whichever reason produced it. A
+    // monitor routed nowhere is a misconfiguration -- dispatch has already
+    // said so in the log -- but refusing to resolve would strand the incident
+    // open forever, since nothing is ever going to deliver it.
+    if (outcome.results.length === 0 || outcome.results.some((r) => r.ok)) {
       resolveIncident(incident.id, now);
     } else {
       console.warn(
@@ -547,7 +565,7 @@ export class Scheduler {
 
     if (incident.alertedAt === null) {
       if (downForMs >= monitor.alertAfterS * 1000) {
-        const results = await dispatch({
+        const outcome = await this.notify({
           kind: 'down',
           monitor,
           incident,
@@ -559,9 +577,9 @@ export class Scheduler {
         // Only record the alert once it was actually delivered somewhere.
         // Otherwise the next failing check retries, so a momentary ntfy
         // hiccup cannot swallow the first DOWN notification forever.
-        if (results.some((r) => r.ok)) {
+        if (outcome.results.some((r) => r.ok)) {
           markIncidentAlerted(incident.id, now);
-        } else if (results.length > 0) {
+        } else if (outcome.results.length > 0) {
           console.warn(`[scheduler] DOWN alert for "${monitor.name}" was not delivered; retrying on next check`);
         }
       }
@@ -571,7 +589,7 @@ export class Scheduler {
     if (monitor.reminderEveryS > 0) {
       const last = incident.lastReminderAt ?? incident.alertedAt;
       if (now - last >= monitor.reminderEveryS * 1000) {
-        const results = await dispatch({
+        const outcome = await this.notify({
           kind: 'still-down',
           monitor,
           incident,
@@ -580,9 +598,9 @@ export class Scheduler {
           at: now,
           suppressed: this.suppressedNames(monitor, monitors),
         });
-        if (results.some((r) => r.ok)) {
+        if (outcome.results.some((r) => r.ok)) {
           markIncidentReminded(incident.id, now);
-        } else if (results.length > 0) {
+        } else if (outcome.results.length > 0) {
           console.warn(`[scheduler] reminder for "${monitor.name}" was not delivered; retrying on next check`);
         }
       }

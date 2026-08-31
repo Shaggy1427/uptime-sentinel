@@ -3,6 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { config } from './config.ts';
 import type {
+  ChannelInput,
+  ChannelType,
   Check,
   CheckResult,
   Incident,
@@ -12,6 +14,7 @@ import type {
   Monitor,
   MonitorInput,
   MonitorType,
+  NotificationChannel,
 } from './types.ts';
 
 fs.mkdirSync(path.dirname(config.dbPath), { recursive: true });
@@ -176,11 +179,44 @@ const MIGRATIONS: string[] = [
   );
   CREATE INDEX idx_login_failures_last_failed ON login_failures(last_failed_at);
   `,
+  // 8: notification channels as rows, and per-monitor routing.
+  //
+  // `config` is the type's own settings as JSON rather than a column per type,
+  // because the point of this change is that two rows can share a type: a loud
+  // ntfy topic and a quiet one. Which keys inside it are credentials is
+  // declared by the type in src/notify/schema.ts, so redaction stays in code
+  // where it can be tested rather than in the schema where it cannot.
+  //
+  // is_default is what preserves existing behaviour: a monitor that names no
+  // channel uses the defaults, so nothing has to be assigned before alerts
+  // keep working. See seedChannelFromEnv() for the upgrade path.
+  `
+  CREATE TABLE channels (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT    NOT NULL,
+    type       TEXT    NOT NULL,
+    config     TEXT    NOT NULL DEFAULT '{}',
+    enabled    INTEGER NOT NULL DEFAULT 1,
+    is_default INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  CREATE INDEX idx_channels_default ON channels(is_default) WHERE is_default = 1;
+
+  CREATE TABLE monitor_channels (
+    monitor_id INTEGER NOT NULL REFERENCES monitors(id)  ON DELETE CASCADE,
+    channel_id INTEGER NOT NULL REFERENCES channels(id)  ON DELETE CASCADE,
+    PRIMARY KEY (monitor_id, channel_id)
+  );
+  CREATE INDEX idx_monitor_channels_channel ON monitor_channels(channel_id);
+  `,
 ];
 
-function migrate(): void {
+/** Applies pending migrations and returns the 1-based numbers it actually ran. */
+function migrate(): number[] {
   const row = prepared('PRAGMA user_version').get() as { user_version: number };
-  let version = Number(row.user_version ?? 0);
+  const version = Number(row.user_version ?? 0);
+  const applied: number[] = [];
   for (let i = version; i < MIGRATIONS.length; i++) {
     db.exec('BEGIN');
     try {
@@ -191,11 +227,32 @@ function migrate(): void {
       db.exec('ROLLBACK');
       throw err;
     }
-    version = i + 1;
+    applied.push(i + 1);
   }
+  return applied;
 }
 
-migrate();
+/**
+ * Migrations this process applied, empty on an already-current database.
+ *
+ * Exported so a one-time upgrade step can run exactly once and never again --
+ * `seedChannelFromEnv` uses it to move an install's NTFY_* settings into the
+ * channels table on the upgrade that creates it. Gating that on "the table is
+ * empty" instead would re-create the row every restart for anyone who had
+ * deliberately deleted all their channels.
+ */
+export const appliedMigrations: readonly number[] = migrate();
+
+/**
+ * The 1-based number of the migration that creates the `channels` table.
+ *
+ * Derived rather than written down. It began life as 7 and became 8 when
+ * durable login throttling landed first, and a stale copy of that number in
+ * seed.ts would not fail loudly -- it would arm the one-time NTFY_* import on
+ * the wrong upgrade, which is silent and only shows up as an install that
+ * stopped alerting. Deriving it means reordering migrations cannot break it.
+ */
+export const CHANNELS_MIGRATION = MIGRATIONS.findIndex((m) => m.includes('CREATE TABLE channels')) + 1;
 
 // --------------------------------------------------------------- transaction
 
@@ -822,6 +879,167 @@ export function updateMaintenance(id: number, input: MaintenanceInput): Maintena
  */
 export function deleteMaintenance(id: number): boolean {
   return Number(prepared('DELETE FROM maintenance WHERE id = ?').run(id).changes) > 0;
+}
+
+// ------------------------------------------------------------------ channels
+
+function toChannel(r: Row): NotificationChannel {
+  let config: Record<string, string | number> = {};
+  try {
+    const parsed: unknown = JSON.parse(String(r.config ?? '{}'));
+    // A hand-edited row could hold anything. A channel whose config is not an
+    // object is better treated as unconfigured than allowed to reach a send.
+    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      config = parsed as Record<string, string | number>;
+    }
+  } catch {
+    config = {};
+  }
+
+  return {
+    id: Number(r.id),
+    name: String(r.name),
+    type: String(r.type) as ChannelType,
+    config,
+    enabled: Number(r.enabled) === 1,
+    isDefault: Number(r.is_default) === 1,
+    createdAt: Number(r.created_at),
+    updatedAt: Number(r.updated_at),
+  };
+}
+
+export function listChannels(): NotificationChannel[] {
+  return (prepared('SELECT * FROM channels ORDER BY name COLLATE NOCASE').all() as Row[]).map(toChannel);
+}
+
+export function getChannel(id: number): NotificationChannel | null {
+  const r = prepared('SELECT * FROM channels WHERE id = ?').get(id) as Row | undefined;
+  return r ? toChannel(r) : null;
+}
+
+/** Whether any channel could receive anything at all, for the dispatch reason. */
+export function anyChannelEnabled(): boolean {
+  const r = prepared('SELECT 1 FROM channels WHERE enabled = 1 LIMIT 1').get() as Row | undefined;
+  return r !== undefined;
+}
+
+export function createChannel(input: ChannelInput): NotificationChannel {
+  const now = Date.now();
+  const info = prepared(
+      `INSERT INTO channels (name, type, config, enabled, is_default, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?)`,
+    )
+    .run(input.name, input.type, JSON.stringify(input.config), bool(input.enabled), bool(input.isDefault), now, now);
+  return getChannel(Number(info.lastInsertRowid))!;
+}
+
+/**
+ * Replace a channel wholesale.
+ *
+ * Not a column-by-column patch: `config` is a single JSON value whose meaning
+ * depends on `type`, so a partial write could leave a row claiming to be
+ * discord while holding an ntfy topic. The API layer merges a PATCH onto the
+ * stored channel -- including carrying forward any secret the client sent back
+ * redacted -- and hands the finished shape here.
+ */
+export function updateChannel(id: number, input: ChannelInput): NotificationChannel | null {
+  if (getChannel(id) === null) return null;
+  prepared(
+      `UPDATE channels SET name = ?, type = ?, config = ?, enabled = ?, is_default = ?, updated_at = ?
+       WHERE id = ?`,
+    )
+    .run(input.name, input.type, JSON.stringify(input.config), bool(input.enabled), bool(input.isDefault), Date.now(), id);
+  return getChannel(id);
+}
+
+export function deleteChannel(id: number): boolean {
+  return Number(prepared('DELETE FROM channels WHERE id = ?').run(id).changes) > 0;
+}
+
+// ------------------------------------------------------------------ routing
+
+/** Replace a monitor's channel assignment. An empty list means "use the defaults". */
+export function setMonitorChannels(monitorId: number, channelIds: readonly number[]): void {
+  prepared('DELETE FROM monitor_channels WHERE monitor_id = ?').run(monitorId);
+  const insert = prepared(
+    'INSERT OR IGNORE INTO monitor_channels (monitor_id, channel_id) VALUES (?,?)',
+  );
+  for (const channelId of channelIds) insert.run(monitorId, channelId);
+}
+
+/** The channel ids a monitor names, assigned or not, in id order. */
+export function monitorChannelIds(monitorId: number): number[] {
+  return (
+    prepared('SELECT channel_id FROM monitor_channels WHERE monitor_id = ? ORDER BY channel_id')
+      .all(monitorId) as Row[]
+  ).map((r) => Number(r.channel_id));
+}
+
+/**
+ * The enabled channels an event for this monitor should go to.
+ *
+ * A monitor that names channels uses exactly those, minus any switched off. A
+ * monitor that names none falls back to the defaults -- which is what keeps
+ * every pre-existing monitor alerting after the upgrade without anyone having
+ * to assign anything.
+ *
+ * Deliberately NOT a fallback when a monitor's own channels are all disabled:
+ * switching a channel off should silence what it carried, not quietly reroute
+ * those alerts somewhere the operator did not choose.
+ */
+export function channelsFor(monitorId: number): NotificationChannel[] {
+  const assigned = (
+    prepared(
+        `SELECT c.* FROM channels c
+         JOIN monitor_channels mc ON mc.channel_id = c.id
+         WHERE mc.monitor_id = ?
+         ORDER BY c.name COLLATE NOCASE`,
+      )
+      .all(monitorId) as Row[]
+  ).map(toChannel);
+
+  if (assigned.length > 0) return assigned.filter((c) => c.enabled);
+
+  return (
+    prepared('SELECT * FROM channels WHERE enabled = 1 AND is_default = 1 ORDER BY name COLLATE NOCASE')
+      .all() as Row[]
+  ).map(toChannel);
+}
+
+/**
+ * Channel names per monitor for every monitor at once.
+ *
+ * `/api/status` describes every monitor on a 10-second poll, so this is two
+ * queries rather than a `channelsFor` per monitor -- the same rule that keeps
+ * the uptime and dependency lookups off the per-monitor path. The caller
+ * passes the monitor list it already holds so this adds no third query.
+ */
+export function routedChannelNames(monitors?: Monitor[]): Map<number, string[]> {
+  const channels = new Map(listChannels().map((c) => [c.id, c]));
+  const defaults = [...channels.values()]
+    .filter((c) => c.enabled && c.isDefault)
+    .map((c) => c.name)
+    .sort((a, b) => a.localeCompare(b));
+
+  const assignedByMonitor = new Map<number, string[]>();
+  const rows = prepared('SELECT monitor_id, channel_id FROM monitor_channels').all() as Row[];
+  for (const row of rows) {
+    const monitorId = Number(row.monitor_id);
+    const channel = channels.get(Number(row.channel_id));
+    // Present in the junction table at all means "this monitor chose", even if
+    // every choice is currently disabled -- which is how an empty list here
+    // stays distinguishable from "never chose" and keeps the defaults away.
+    const list = assignedByMonitor.get(monitorId) ?? [];
+    if (channel?.enabled) list.push(channel.name);
+    assignedByMonitor.set(monitorId, list);
+  }
+
+  const out = new Map<number, string[]>();
+  for (const monitor of monitors ?? listMonitors()) {
+    const chosen = assignedByMonitor.get(monitor.id);
+    out.set(monitor.id, (chosen ?? defaults).slice().sort((a, b) => a.localeCompare(b)));
+  }
+  return out;
 }
 
 // ------------------------------------------------------------ dependencies

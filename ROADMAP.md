@@ -28,7 +28,8 @@ Delivered and in `main`:
 | JSON assertions | A path reader plus ten operators, with `[*]` requiring the condition to hold for every match |
 | Delivery-aware alerting | An alert is only recorded once it was actually delivered; a failed send retries on the next check |
 | Restart-safe state | Open incidents are rehydrated, so a reboot mid-outage does not re-alert from zero |
-| ntfy notifications | Four notification kinds, per-kind priorities and tags, tap-through to the dashboard |
+| ntfy and Discord notifications | Four notification kinds, per-kind priorities and tags, tap-through to the dashboard |
+| Per-monitor channel routing | Channels are records, so two topics of one type coexist; monitors pick, or fall back to the defaults |
 | Web dashboard | Vanilla JS, no build; in-place card updates, sparklines, uptime, incident history |
 | Auth | Optional shared password, signed session cookies, bearer tokens, constant-time comparison, login rate limiting |
 | Prometheus `/metrics` | 17 metric families, behind the same auth as the API, three SQLite queries per scrape |
@@ -111,21 +112,34 @@ New capability that fits the current architecture.
 
 ### Notifications
 
-- [ ] **More channels** — Discord, Gotify, Telegram, email. The channel registry
-      exists for exactly this: add a file in `src/notify/`, export a `Channel`,
-      and add it to the array in `src/notify/index.ts`. Nothing else needs to
-      change. Discord and Gotify are the closest to ntfy in shape and are the
-      obvious first two.
-- [ ] **Per-monitor channel routing.** Critical services to a loud channel,
-      everything else to a quiet one. Needs a `channels` column on `monitors`
-      (a new migration), a field in the editor, and a filter in `dispatch()`.
-      Depends on there being more than one channel to route between.
+- [ ] **More channels** — Gotify, Telegram, email. Discord is done. The type
+      registry exists for exactly this: add a file in `src/notify/`, export a
+      `ChannelTypeDef`, add it to `TYPES` in `src/notify/registry.ts` and its
+      fields to `CHANNEL_SCHEMA` in `src/notify/schema.ts`. Nothing else needs
+      to change — routing, redaction, validation and export all read the
+      schema. Gotify is the closest to ntfy in shape.
+- [x] **Per-monitor channel routing.** Done. Channels are rows rather than
+      environment variables, so two ntfy topics — one loud, one quiet — are
+      two records of the same type. Monitors link to them many-to-many;
+      naming none uses whichever are marked default, which is what kept every
+      existing monitor alerting across the upgrade. Credentials are write-only
+      like monitor headers.
 - [ ] **Quiet hours.** Suppress non-urgent alerts overnight and still queue a
       summary for the morning. The state machine already distinguishes "down"
       from "alerted", so the hook is a check before `dispatch` plus somewhere to
       hold the deferred summary. `src/suppression.ts` now holds the reason
       union both existing gates flow through: adding `'quiet-hours'` to
-      `SUPPRESSION_REASONS` with its own policy is most of the wiring.
+      `SUPPRESSION_REASONS` with its own policy is most of the wiring. With
+      channels now routable per monitor, the other half — "loud overnight only
+      for these" — is a routing question, and per-kind routes are sketched
+      below.
+
+- [ ] **Per-kind channel routes.** Page the loud channel for `down`, send
+      `up` to the quiet one. The junction table `monitor_channels` is where it
+      goes: a nullable `kinds` column filtering which notification kinds a
+      route accepts, NULL meaning all of them. Deliberately left out of the
+      routing change itself — it was speculative while ntfy was the only type,
+      and it is much easier to argue now that recovery messages can wake you.
 
 ### Monitoring
 

@@ -18,19 +18,28 @@ const { buildServer } = await import('../src/server.ts');
 const { exportConfig, importConfig } = await import('../src/config-io.ts');
 const { renderMetrics } = await import('../src/metrics.ts');
 const store = await import('../src/db.ts');
-const { channels } = await import('../src/notify/index.ts');
 import type { NotificationEvent } from '../src/notify/types.ts';
 import type { MaintenanceRule, WeeklyRule } from '../src/types.ts';
 
-// A stand-in channel, so "did this alert" is an assertion rather than a guess.
+// A real ntfy endpoint, so "did this alert" is an assertion about what left
+// the process rather than about what the scheduler intended to send.
 const sent: NotificationEvent['kind'][] = [];
-channels.length = 0;
-channels.push({
-  name: 'fake',
-  enabled: () => true,
-  async send(event) {
-    sent.push(event.kind);
-  },
+
+function kindOf(title: string): NotificationEvent['kind'] {
+  if (title.startsWith('STILL DOWN:')) return 'still-down';
+  if (title.startsWith('DOWN:')) return 'down';
+  if (title.startsWith('RECOVERED:')) return 'up';
+  return 'test';
+}
+
+const ntfyServer = http.createServer((req, res) => {
+  sent.push(kindOf(String(req.headers.title ?? '')));
+  req.resume();
+  res.writeHead(200);
+  res.end();
+});
+const ntfyPort = await new Promise<number>((resolve) => {
+  ntfyServer.listen(0, '127.0.0.1', () => resolve((ntfyServer.address() as { port: number }).port));
 });
 
 // Target whose status code the tests flip between 503 and 200.
@@ -59,12 +68,21 @@ let monitorId = 0;
 
 after(async () => {
   await new Promise((r) => origin.close(r));
+  await new Promise((r) => ntfyServer.close(r));
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
 beforeEach(() => {
   for (const w of store.listMaintenance()) store.deleteMaintenance(w.id);
   for (const m of store.listMonitors()) store.deleteMonitor(m.id);
+  for (const c of store.listChannels()) store.deleteChannel(c.id);
+  store.createChannel({
+    name: 'fake',
+    type: 'ntfy',
+    config: { url: `http://127.0.0.1:${ntfyPort}`, topic: 'maint' },
+    enabled: true,
+    isDefault: true,
+  });
   sent.length = 0;
   mode = 503;
   monitorId = store.createMonitor({

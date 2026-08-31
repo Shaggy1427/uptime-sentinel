@@ -132,3 +132,31 @@ export type MaintenanceWindow = MaintenanceRule & { monitorIds: number[] };
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 
 export type MaintenanceInput = DistributiveOmit<MaintenanceWindow, 'id' | 'createdAt' | 'updatedAt'>;
+
+/**
+ * A configured notification destination.
+ *
+ * `type` names the implementation; `config` holds that type's own settings.
+ * Storing the settings as an opaque map rather than a column per type is what
+ * lets two rows of the same type coexist -- a loud ntfy topic and a quiet one
+ * -- which is the case per-monitor routing exists to serve. Each type declares
+ * which of its keys are credentials; see `src/notify/schema.ts`.
+ */
+export type ChannelType = 'ntfy' | 'discord';
+
+export type ChannelConfig = Record<string, string | number>;
+
+export interface NotificationChannel {
+  id: number;
+  name: string;
+  type: ChannelType;
+  config: ChannelConfig;
+  /** A channel switched off without being deleted; it is skipped when routing. */
+  enabled: boolean;
+  /** Used by monitors that name no channel of their own. */
+  isDefault: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type ChannelInput = Omit<NotificationChannel, 'id' | 'createdAt' | 'updatedAt'>;

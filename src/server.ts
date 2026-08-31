@@ -9,13 +9,14 @@ import { config, VERSION } from './config.ts';
 import * as store from './db.ts';
 import { scheduler } from './scheduler.ts';
 import { dispatch } from './notify/index.ts';
-import { validateMaintenance, validateMonitor, ValidationError } from './validate.ts';
+import { validateChannel, validateMaintenance, validateMonitor, ValidationError } from './validate.ts';
 import type { ValidateOptions } from './validate.ts';
 import { openRule } from './maintenance.ts';
+import { REDACTED, secretKeys } from './notify/schema.ts';
 import { cookieSecret, passwordMatches } from './secret.ts';
 import { renderMetrics } from './metrics.ts';
 import { exportConfig, importConfig } from './config-io.ts';
-import type { Monitor, Incident } from './types.ts';
+import type { Monitor, Incident, NotificationChannel } from './types.ts';
 
 const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 
@@ -37,6 +38,22 @@ function redact(monitor: Monitor) {
   const masked: Record<string, string> = {};
   for (const key of Object.keys(monitor.headers)) masked[key] = '<redacted>';
   return { ...monitor, headers: masked };
+}
+
+/**
+ * A channel's credentials are write-only, exactly like a monitor's headers.
+ *
+ * Which keys count is declared by the channel type rather than listed here, so
+ * adding a type cannot leak its token by forgetting to update this. The key
+ * stays present with a placeholder so the editor can show that something is
+ * set, and sending that placeholder back means "leave it unchanged".
+ */
+function redactChannel(channel: NotificationChannel) {
+  const config: Record<string, string | number> = { ...channel.config };
+  for (const key of secretKeys(channel.type)) {
+    if (config[key] !== undefined && config[key] !== '') config[key] = REDACTED;
+  }
+  return { ...channel, config };
 }
 
 /** Integer limit params that fall back to a default and clamp to [1, max]. */
@@ -84,6 +101,14 @@ interface StatusContext {
    * exactly what the O(1) rule exists to prevent.
    */
   maintenanceByMonitor: Map<number, { id: number; name: string }>;
+  /**
+   * Channel names each monitor's alerts would go to right now.
+   *
+   * Built once for every monitor rather than resolved per monitor: this rides
+   * the 10-second dashboard poll, where a query per monitor is exactly what
+   * the O(1) rule exists to prevent.
+   */
+  channelsByMonitor: Map<number, string[]>;
 }
 
 /**
@@ -132,6 +157,7 @@ function contextForOne(monitor: Monitor): StatusContext {
     ]),
     dependentCountByMonitor: store.descendantCountMap(monitors),
     maintenanceByMonitor: openWindowsByMonitor(now),
+    channelsByMonitor: store.routedChannelNames(monitors),
   };
 }
 
@@ -162,6 +188,9 @@ function describe(monitor: Monitor, ctx: StatusContext) {
   // watching a card that still says "down".
   const maintenance = monitor.paused ? null : (ctx.maintenanceByMonitor.get(monitor.id) ?? null);
   const liveStatus = state?.status ?? 'pending';
+  // Named rather than counted, so the dashboard can say which destination is
+  // missing instead of only that one is.
+  const channels = ctx.channelsByMonitor.get(monitor.id) ?? [];
 
   return {
     ...redact(monitor),
@@ -176,6 +205,7 @@ function describe(monitor: Monitor, ctx: StatusContext) {
           ? 'maintenance'
           : liveStatus,
     maintenance,
+    channels,
     parentName: parent?.name ?? null,
     // Named so the dashboard can say what a monitor is waiting on rather than
     // just showing it greyed out for no visible reason.
@@ -449,11 +479,14 @@ export async function buildServer() {
       uptimeByMonitor: store.uptimeSinceAll([now - DAY, now - 7 * DAY, now - 30 * DAY]),
       dependentCountByMonitor: store.descendantCountMap(monitors),
       maintenanceByMonitor: openWindowsByMonitor(now),
+      channelsByMonitor: store.routedChannelNames(monitors),
     };
 
     return {
       generatedAt: now,
-      notificationsConfigured: config.ntfy.topic !== '',
+      // Any enabled channel at all. Whether a *particular* monitor reaches one
+      // is per-monitor now, and rides along as `channels` on each entry.
+      notificationsConfigured: store.anyChannelEnabled(),
       monitors: monitors.map((m) => describe(m, ctx)),
     };
   });
@@ -523,6 +556,79 @@ export async function buildServer() {
     },
   );
 
+  // -------------------------------------------------------------- channels
+
+  app.get('/api/channels', async () => store.listChannels().map(redactChannel));
+
+  app.get<{ Params: { id: string } }>('/api/channels/:id', async (req, reply) => {
+    const id = parseId(req.params.id);
+    if (id === null) return reply.code(400).send({ error: 'Invalid channel id' });
+    const channel = store.getChannel(id);
+    if (!channel) return reply.code(404).send({ error: 'Channel not found' });
+    return redactChannel(channel);
+  });
+
+  app.post('/api/channels', async (req, reply) => {
+    const input = validateChannel(req.body, { partial: false });
+    return reply.code(201).send(redactChannel(store.createChannel(input)));
+  });
+
+  app.patch<{ Params: { id: string } }>('/api/channels/:id', async (req, reply) => {
+    const id = parseId(req.params.id);
+    if (id === null) return reply.code(400).send({ error: 'Invalid channel id' });
+    const existing = store.getChannel(id);
+    if (!existing) return reply.code(404).send({ error: 'Channel not found' });
+    // The stored channel is passed so a secret returned as `<redacted>` is
+    // carried forward rather than saved literally over a working token.
+    const input = validateChannel(req.body, { partial: true, current: existing });
+    const channel = store.updateChannel(id, input);
+    return channel ? redactChannel(channel) : channel;
+  });
+
+  app.delete<{ Params: { id: string } }>('/api/channels/:id', async (req, reply) => {
+    const id = parseId(req.params.id);
+    if (id === null) return reply.code(400).send({ error: 'Invalid channel id' });
+    const removed = store.deleteChannel(id);
+    if (!removed) return reply.code(404).send({ error: 'Channel not found' });
+    // Monitors that named only this channel now name nothing, which means they
+    // fall back to the defaults rather than going silent. Said here because
+    // that is the one part of deletion that is not obvious.
+    return reply.code(204).send();
+  });
+
+  // Which channels a monitor routes to. Empty means "use the defaults", which
+  // is the state every monitor starts in.
+  app.get<{ Params: { id: string } }>('/api/monitors/:id/channels', async (req, reply) => {
+    const id = parseId(req.params.id);
+    if (id === null) return reply.code(400).send({ error: 'Invalid monitor id' });
+    if (!store.getMonitor(id)) return reply.code(404).send({ error: 'Monitor not found' });
+    return { channelIds: store.monitorChannelIds(id) };
+  });
+
+  app.put<{ Params: { id: string } }>('/api/monitors/:id/channels', async (req, reply) => {
+    const id = parseId(req.params.id);
+    if (id === null) return reply.code(400).send({ error: 'Invalid monitor id' });
+    if (!store.getMonitor(id)) return reply.code(404).send({ error: 'Monitor not found' });
+
+    const { channelIds } = (req.body ?? {}) as { channelIds?: unknown };
+    if (!Array.isArray(channelIds)) return reply.code(400).send({ error: 'channelIds must be an array' });
+
+    const ids: number[] = [];
+    for (const raw of channelIds) {
+      const channelId = typeof raw === 'number' && Number.isSafeInteger(raw) && raw > 0 ? raw : null;
+      if (channelId === null) return reply.code(400).send({ error: 'channelIds must be positive integers' });
+      // Checked rather than ignored: a stale id would silently route the
+      // monitor to fewer channels than the operator just chose.
+      if (!store.getChannel(channelId)) {
+        return reply.code(400).send({ error: `No channel with id ${channelId}` });
+      }
+      ids.push(channelId);
+    }
+
+    store.setMonitorChannels(id, ids);
+    return { channelIds: store.monitorChannelIds(id) };
+  });
+
   // ----------------------------------------------------------- maintenance
 
   app.get('/api/maintenance', async () => store.listMaintenance());
@@ -584,7 +690,7 @@ export async function buildServer() {
   // ---------------------------------------------------------- test notify
 
   app.post('/api/test-notification', async (req, reply) => {
-    const { monitorId } = (req.body ?? {}) as { monitorId?: unknown };
+    const { monitorId, channelId } = (req.body ?? {}) as { monitorId?: unknown; channelId?: unknown };
     const wantId =
       typeof monitorId === 'number' && Number.isSafeInteger(monitorId) && monitorId > 0 ? monitorId : null;
     const monitor = wantId !== null ? store.getMonitor(wantId) : store.listMonitors()[0];
@@ -616,18 +722,44 @@ export async function buildServer() {
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
-    const results = await dispatch({
+    // Testing one channel is the point of the button once there is more than
+    // one: "is this new Discord webhook right" is a different question from
+    // "does anything work at all".
+    const wantChannel =
+      typeof channelId === 'number' && Number.isSafeInteger(channelId) && channelId > 0 ? channelId : null;
+
+    let targets;
+    if (wantChannel !== null) {
+      const channel = store.getChannel(wantChannel);
+      if (!channel) return reply.code(404).send({ error: 'Channel not found' });
+      // Sent even when the channel is switched off: you are testing this
+      // channel's settings, and refusing would make a disabled channel
+      // impossible to fix before turning it back on.
+      targets = [channel];
+    } else {
+      targets = store.channelsFor(subject.id);
+    }
+
+    const outcome = await dispatch({
       kind: 'test',
       monitor: subject,
       incident: null,
       reason: null,
       downForMs: null,
       at: Date.now(),
-    });
-    if (results.length === 0) {
-      return reply.code(400).send({ error: 'No notification channel is configured. Set NTFY_TOPIC.' });
+    }, targets, store.anyChannelEnabled());
+
+    if (outcome.results.length === 0) {
+      // Two different problems, two different answers -- telling someone to
+      // set NTFY_TOPIC when they have three channels and a bad assignment
+      // sends them to the wrong file entirely.
+      const error =
+        outcome.reason === 'none-configured'
+          ? 'No notification channel is configured. Add one first.'
+          : `"${subject.name}" is not routed to any enabled channel.`;
+      return reply.code(400).send({ error });
     }
-    return { results };
+    return { results: outcome.results };
   });
 
   return app;
