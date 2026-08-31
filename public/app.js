@@ -107,7 +107,6 @@ function sparkline() {
   // hidden and replaced by a single sentence updated alongside it.
   wrap.setAttribute('aria-hidden', 'true');
   const summary = el('span', 'sr-only');
-  summary.setAttribute('role', 'status');
   const bars = [];
   for (let i = 0; i < SPARK_SLOTS; i++) {
     const bar = el('i');
@@ -1041,9 +1040,12 @@ $('#login-form').addEventListener('submit', submitLogin);
 $('#btn-logout').onclick = async () => {
   try {
     await api('/api/logout', { method: 'POST' });
-  } catch {
-    // The cookie is being discarded either way; a failure here should not
-    // strand someone on a dashboard they asked to leave.
+  } catch (err) {
+    // The session cookie is HttpOnly, so only reload after the server confirms
+    // that the clearing Set-Cookie reached the browser. Otherwise the page can
+    // appear to log out while leaving the session active.
+    if (err.message !== 'Unauthorized') banner(`Log out failed: ${err.message}`, 'err');
+    return;
   }
   stopPolling();
   location.reload();
