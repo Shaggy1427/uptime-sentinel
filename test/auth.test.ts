@@ -11,6 +11,7 @@ process.env.AUTH_PASSWORD = 'hunter2';
 
 // Imported after env is set: config and the database are read at module load.
 const { buildServer } = await import('../src/server.ts');
+const store = await import('../src/db.ts');
 
 let app: Awaited<ReturnType<typeof buildServer>>;
 
@@ -27,10 +28,14 @@ after(async () => {
 test('protected endpoints require auth', async () => {
   const res = await app.inject({ method: 'GET', url: '/api/status' });
   assert.equal(res.statusCode, 401);
+});
 
-  const open = await app.inject({ method: 'GET', url: '/api/auth' });
-  assert.equal(open.statusCode, 200);
-  assert.equal(open.json().required, true);
+test('the standalone auth-discovery endpoint is removed', async () => {
+  // /api/auth used to be the "is auth on?" probe. It was unauthenticated,
+  // unlimited, and not actually used by the dashboard. Clients learn whether
+  // auth is required by trying /api/status and seeing the 401 instead.
+  const gone = await app.inject({ method: 'GET', url: '/api/auth' });
+  assert.equal(gone.statusCode, 404);
 });
 
 test('password and bearer token grant access', async () => {
@@ -84,10 +89,58 @@ test('the config endpoints are guarded like the rest of the API', async () => {
   assert.equal(ok.json().version, 1);
 });
 
-test('repeated failed logins are rate limited', async () => {
-  let last;
-  for (let i = 0; i < 15; i++) {
-    last = await app.inject({ method: 'POST', url: '/api/login', payload: { password: 'wrong' } });
+test('the threshold-triggering login is persistently rate limited', async () => {
+  const remoteAddress = '192.0.2.10';
+  for (let i = 1; i <= store.LOGIN_LOCKOUT_THRESHOLD; i++) {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/login',
+      remoteAddress,
+      payload: { password: 'wrong' },
+    });
+    assert.equal(res.statusCode, i === store.LOGIN_LOCKOUT_THRESHOLD ? 429 : 401);
+    if (res.statusCode === 429) assert.equal(res.headers['retry-after'], '300');
   }
-  assert.equal(last?.statusCode, 429);
+});
+
+test('expired counters reset and stale source addresses are pruned', () => {
+  const now = 1_000_000;
+  const expiredAt = now - store.LOGIN_LOCKOUT_WINDOW_MS - 1;
+
+  for (let i = 0; i < store.LOGIN_LOCKOUT_THRESHOLD; i++) {
+    store.recordLoginFailure('192.0.2.20', expiredAt);
+  }
+  assert.equal(store.loginLockoutRemainingMs('192.0.2.20', expiredAt), store.LOGIN_LOCKOUT_WINDOW_MS);
+  assert.equal(store.loginLockoutRemainingMs('192.0.2.20', now), 0);
+  assert.equal(store.recordLoginFailure('192.0.2.20', now).failed_count, 1);
+
+  store.recordLoginFailure('192.0.2.21', expiredAt);
+  store.recordLoginFailure('192.0.2.22', now);
+  assert.equal(store.getLoginFailure('192.0.2.21'), null);
+});
+
+test('login lockout survives a server restart', async () => {
+  const remoteAddress = '192.0.2.30';
+  for (let i = 0; i < store.LOGIN_LOCKOUT_THRESHOLD; i++) {
+    await app.inject({ method: 'POST', url: '/api/login', remoteAddress, payload: { password: 'wrong' } });
+  }
+  assert.ok(store.loginLockoutRemainingMs(remoteAddress) > 0);
+
+  await app.close();
+
+  const restarted = await buildServer();
+  await restarted.ready();
+  try {
+    const res = await restarted.inject({
+      method: 'POST',
+      url: '/api/login',
+      remoteAddress,
+      payload: { password: 'hunter2' },
+    });
+    assert.equal(res.statusCode, 429, `expected 429 after restart, got ${res.statusCode}`);
+    assert.match(res.body, /Too many requests/);
+    assert.ok(Number(res.headers['retry-after']) > 0);
+  } finally {
+    await restarted.close();
+  }
 });
