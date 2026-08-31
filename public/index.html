@@ -31,6 +31,7 @@
       <button id="btn-export" class="ghost" title="Download every monitor as a JSON file">Export</button>
       <button id="btn-import" class="ghost" title="Add or update monitors from a JSON file">Import</button>
       <button id="btn-test" class="ghost" title="Send a test notification to ntfy">Test alert</button>
+      <button id="btn-maintenance" class="ghost" title="Schedule expected downtime">Maintenance</button>
       <button id="btn-add" class="primary">Add monitor</button>
     </div>
   </header>
@@ -134,6 +135,77 @@
       <menu>
         <button type="button" id="editor-cancel" class="ghost">Cancel</button>
         <button type="submit" class="primary">Save</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="maintenance">
+    <form id="maintenance-form" method="dialog">
+      <h2>Maintenance windows</h2>
+      <p class="hint">
+        Inside a window the monitors you pick are still checked, but they cannot alert and the
+        results do not count towards uptime. Use this for planned downtime; use Pause to stop
+        watching something indefinitely.
+      </p>
+
+      <div id="maintenance-list" class="report"></div>
+
+      <fieldset class="wide">
+        <legend>Add a window</legend>
+        <div class="fields">
+          <label class="wide">Name<input name="name" required maxlength="120" placeholder="Sunday NAS reboot" /></label>
+
+          <label>Repeats
+            <select name="strategy">
+              <option value="weekly">Every week</option>
+              <option value="once">Once</option>
+            </select>
+          </label>
+
+          <label>Time zone
+            <input name="timezone" placeholder="(server time zone)" />
+            <small>An IANA name such as <code>Europe/London</code>. Blank uses the server's own.</small>
+          </label>
+
+          <fieldset class="weekly-only wide">
+            <legend>Weekly schedule</legend>
+            <div class="fields">
+              <label class="wide">Days
+                <span class="weekdays">
+                  <label class="check"><input type="checkbox" name="weekday" value="0" /> Sun</label>
+                  <label class="check"><input type="checkbox" name="weekday" value="1" /> Mon</label>
+                  <label class="check"><input type="checkbox" name="weekday" value="2" /> Tue</label>
+                  <label class="check"><input type="checkbox" name="weekday" value="3" /> Wed</label>
+                  <label class="check"><input type="checkbox" name="weekday" value="4" /> Thu</label>
+                  <label class="check"><input type="checkbox" name="weekday" value="5" /> Fri</label>
+                  <label class="check"><input type="checkbox" name="weekday" value="6" /> Sat</label>
+                </span>
+              </label>
+              <label>Starts at<input name="startTime" type="time" value="03:00" /></label>
+              <label>Lasts (minutes)<input name="durationMin" type="number" min="1" max="1440" value="60" /></label>
+            </div>
+          </fieldset>
+
+          <fieldset class="once-only wide">
+            <legend>One-off schedule</legend>
+            <div class="fields">
+              <label>From<input name="startsAt" type="datetime-local" /></label>
+              <label>Until<input name="endsAt" type="datetime-local" /></label>
+              <small class="wide">Read in your browser's time zone, not the one above.</small>
+            </div>
+          </fieldset>
+
+          <label class="wide">Applies to
+            <select name="monitorIds" multiple size="6"></select>
+            <small>Ctrl- or Cmd-click to select more than one.</small>
+          </label>
+        </div>
+      </fieldset>
+
+      <p id="maintenance-error" class="error hidden"></p>
+      <menu>
+        <button type="button" id="maintenance-cancel" class="ghost">Close</button>
+        <button type="submit" class="primary">Add window</button>
       </menu>
     </form>
   </dialog>

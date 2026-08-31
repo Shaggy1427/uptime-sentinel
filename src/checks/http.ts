@@ -19,12 +19,14 @@ export async function httpCheck(monitor: Monitor): Promise<CheckResult> {
 
     let found = false;
     let truncated = false;
-    if (monitor.keyword) {
+    if (monitor.keyword && accepts(statusCode)) {
       const capped = await readBodyCapped(res, BODY_CAP_BYTES);
       found = capped.body.includes(monitor.keyword);
       truncated = capped.truncated;
     } else {
       // Drain so the socket returns to the pool instead of hanging around.
+      // This is also the path for a status the monitor rejects: the keyword
+      // verdict would be discarded anyway, so the body is not worth reading.
       await res.body?.cancel().catch(() => {});
     }
 
