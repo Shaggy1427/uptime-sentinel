@@ -1026,7 +1026,6 @@ curl -H 'Authorization: Bearer your-dashboard-password' \
 | Method | Path | Auth | Rate limit | Purpose |
 |--------|------|------|------------|---------|
 | `GET` | `/api/health` | never required | global | Liveness, version, and counts of monitors that are down or suppressed |
-| `GET` | `/api/auth` | never required | global | `{ "required": true\|false }`, so the dashboard knows whether to show a login prompt |
 | `POST` | `/api/login` | never required | **10 per 5 minutes** | Body `{ "password": "…" }`. Sets the session cookie |
 | `POST` | `/api/logout` | required | global | Clears the session cookie |
 | `GET` | `/api/status` | required | global | Everything the dashboard renders, in one call |
@@ -1474,9 +1473,9 @@ usual file is safe to copy around; with it, the response carries live
 credentials in plain text and should be handled like a copy of the database.
 Both forms need the password when `AUTH_PASSWORD` is set.
 
-**`/api/health` and `/api/auth` are deliberately unauthenticated** so an
-external dead-man's-switch can poll liveness and the dashboard can tell whether
-to show a login prompt. Neither returns targets or configuration.
+**`/api/health` is deliberately unauthenticated** so an external
+dead-man's-switch can poll liveness. It does not return targets or
+configuration.
 
 **Behind a reverse proxy**, set `TRUST_PROXY=true` so rate limits key on the
 real client rather than on the proxy. Do not set it otherwise: without a proxy
