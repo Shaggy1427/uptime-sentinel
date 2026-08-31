@@ -80,6 +80,22 @@ function setShown(node, shown) {
   node.classList.toggle('hidden', !shown);
 }
 
+/**
+ * The status in words, for the badge on each card.
+ *
+ * Every state used to be carried by a border tint and a 9px dot, which is
+ * colour alone -- "up", "pending" and "paused" were indistinguishable to
+ * anyone who cannot separate green, amber and grey.
+ */
+const STATUS_LABEL = {
+  up: 'Up',
+  down: 'Down',
+  pending: 'Checking',
+  paused: 'Paused',
+  suppressed: 'Waiting',
+  maintenance: 'Maintenance',
+};
+
 // ------------------------------------------------------------------- render
 
 const SPARK_SLOTS = 40;
@@ -87,6 +103,11 @@ const SPARK_SLOTS = 40;
 /** A fixed row of bars, reused across refreshes so the height transition runs. */
 function sparkline() {
   const wrap = el('div', 'spark');
+  // Forty bars with per-bar tooltips are unusable one at a time, so the row is
+  // hidden and replaced by a single sentence updated alongside it.
+  wrap.setAttribute('aria-hidden', 'true');
+  const summary = el('span', 'sr-only');
+  summary.setAttribute('role', 'status');
   const bars = [];
   for (let i = 0; i < SPARK_SLOTS; i++) {
     const bar = el('i');
@@ -131,7 +152,24 @@ function sparkline() {
     });
   }
 
-  return { node: wrap, update };
+  /** The same information the bars carry, as one readable sentence. */
+  function describe(history) {
+    if (history.length === 0) return 'No checks recorded yet.';
+    const failed = history.filter((h) => !h.ok).length;
+    const shown = history.length;
+    return failed === 0
+      ? `Last ${shown} checks all passed.`
+      : `${failed} of the last ${shown} checks failed.`;
+  }
+
+  return {
+    node: wrap,
+    summary,
+    update(history) {
+      update(history);
+      setText(summary, describe(history));
+    },
+  };
 }
 
 /**
@@ -150,8 +188,13 @@ function monitorCard(monitor) {
   const card = el('article');
   const head = el('div', 'm-head');
   const name = el('span', 'm-name');
+  const state = el('span', 'm-state');
   const type = el('span', 'm-type');
-  head.append(el('span', 'dot'), name, type);
+  // The dot is decorative now that the badge says the state in words; leaving
+  // it exposed would have a screen reader announce an empty span.
+  const dot = el('span', 'dot');
+  dot.setAttribute('aria-hidden', 'true');
+  head.append(dot, name, state, type);
 
   const target = el('div', 'm-target');
   const maintenance = el('div', 'm-maintenance');
@@ -220,15 +263,21 @@ function monitorCard(monitor) {
   };
 
   actions.append(check, pause, el('span', 'spacer'), edit, remove);
-  card.append(head, target, maintenance, waiting, error, deps, spark.node, stats, actions);
+  card.append(head, target, maintenance, waiting, error, deps, spark.node, spark.summary, stats, actions);
 
   function update(next) {
     current = next;
 
     setClass(card, `card monitor ${next.status}`);
     setText(name, next.name);
+    setText(state, STATUS_LABEL[next.status] ?? next.status);
     setText(type, next.type);
     setText(target, next.target);
+
+    // Names the card as a region, so tabbing or browsing by landmark says
+    // which monitor and what state rather than just "article".
+    const described = `${next.name}, ${STATUS_LABEL[next.status] ?? next.status}`;
+    if (card.getAttribute('aria-label') !== described) card.setAttribute('aria-label', described);
 
     const inMaintenance = next.status === 'maintenance';
     setShown(maintenance, inMaintenance);
@@ -359,7 +408,10 @@ function renderMonitors(monitors) {
   reorder(grid, ordered.map((m) => cards.get(m.id).node));
 }
 
-function renderSummary(monitors, notificationsConfigured) {
+function renderSummary(monitors, notificationsConfigured, authRequired) {
+  // Only offered when a password is actually set: with auth off there is no
+  // session to end, and the button would clear a cookie that means nothing.
+  setShown($('#btn-logout'), authRequired === true);
   const count = (status) => monitors.filter((m) => m.status === status).length;
   const summary = $('#summary');
   summary.replaceChildren();
@@ -580,8 +632,7 @@ async function saveEditor(event) {
 // ------------------------------------------------------------------- login
 
 function showLogin() {
-  if (timer) clearInterval(timer);
-  timer = null;
+  stopPolling();
   $('#login').classList.remove('hidden');
 }
 
@@ -782,15 +833,33 @@ function setReachable(ok) {
 async function refresh() {
   const [status, incidents] = await Promise.all([api('/api/status'), api('/api/incidents?limit=25')]);
   lastMonitors = status.monitors;
-  renderSummary(status.monitors, status.notificationsConfigured);
+  renderSummary(status.monitors, status.notificationsConfigured, status.authRequired);
   renderMonitors(status.monitors);
   renderIncidents(incidents);
   lastSuccessAt = Date.now();
   setReachable(true);
 }
 
-function start() {
+function stopPolling() {
   if (timer) clearInterval(timer);
+  timer = null;
+}
+
+/**
+ * Whether the dashboard should be polling at all.
+ *
+ * A hidden tab has nobody looking at it, and this runs against a Raspberry Pi:
+ * a forgotten background tab was asking for the full status every ten seconds
+ * indefinitely. Sitting on the login screen is the other case -- every request
+ * would 401 and re-open the overlay that is already open.
+ */
+function shouldPoll() {
+  return document.visibilityState === 'visible' && $('#login').classList.contains('hidden');
+}
+
+function start() {
+  stopPolling();
+  if (!shouldPoll()) return;
   const tick = () =>
     refresh().catch((err) => {
       // A 401 is not a reachability problem; api() has already shown the login
@@ -968,6 +1037,24 @@ $('#editor-form').addEventListener('submit', saveEditor);
 $('#editor-form').elements.type.addEventListener('change', syncEditorType);
 $('#editor-form').elements.jsonOperator.addEventListener('change', syncJsonOperator);
 $('#login-form').addEventListener('submit', submitLogin);
+
+$('#btn-logout').onclick = async () => {
+  try {
+    await api('/api/logout', { method: 'POST' });
+  } catch {
+    // The cookie is being discarded either way; a failure here should not
+    // strand someone on a dashboard they asked to leave.
+  }
+  stopPolling();
+  location.reload();
+};
+
+// Stop polling a tab nobody is looking at, and catch up on return rather than
+// showing whatever was on screen when it was hidden.
+document.addEventListener('visibilitychange', () => {
+  if (shouldPoll()) start();
+  else stopPolling();
+});
 
 $('#btn-export').onclick = () => {
   $('#export-form').reset();
