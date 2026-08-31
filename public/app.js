@@ -107,6 +107,18 @@ function sparkline() {
         setClass(bar, 'empty');
         setHeight(bar, '');
         setTitle(bar, '');
+      } else if (point.maintenanceId != null) {
+        // Drawn at its real latency when there is one, so a window that the
+        // service sailed through does not look like an outage. A failure
+        // inside a window still shows full height, just not in the down
+        // colour: it happened, but it did not count and did not alert.
+        setClass(bar, 'maint');
+        setHeight(bar, point.ok ? `${Math.max(12, Math.round(((point.latencyMs ?? 0) / max) * 100))}%` : '100%');
+        setTitle(
+          bar,
+          `${point.ok ? `${point.latencyMs ?? '?'}ms` : 'Failed check'} during maintenance - ` +
+            `${new Date(point.checkedAt).toLocaleTimeString()}`,
+        );
       } else if (!point.ok) {
         setClass(bar, 'bad');
         setHeight(bar, '100%');
@@ -142,6 +154,7 @@ function monitorCard(monitor) {
   head.append(el('span', 'dot'), name, type);
 
   const target = el('div', 'm-target');
+  const maintenance = el('div', 'm-maintenance');
   const waiting = el('div', 'm-waiting');
   const error = el('div', 'm-error');
   const deps = el('div', 'm-deps');
@@ -207,7 +220,7 @@ function monitorCard(monitor) {
   };
 
   actions.append(check, pause, el('span', 'spacer'), edit, remove);
-  card.append(head, target, waiting, error, deps, spark.node, stats, actions);
+  card.append(head, target, maintenance, waiting, error, deps, spark.node, stats, actions);
 
   function update(next) {
     current = next;
@@ -217,10 +230,18 @@ function monitorCard(monitor) {
     setText(type, next.type);
     setText(target, next.target);
 
+    const inMaintenance = next.status === 'maintenance';
+    setShown(maintenance, inMaintenance);
+    if (inMaintenance) {
+      setText(maintenance, `Maintenance — ${next.maintenance?.name ?? 'window open'}. Still checking, not alerting.`);
+    }
+
     const suppressed = next.status === 'suppressed';
     setShown(waiting, suppressed);
     if (suppressed) setText(waiting, `Not checked — waiting on ${next.suppressedBy ?? 'a dependency'}`);
 
+    // A failure inside a window is reported by the maintenance line above, not
+    // as an outage: it did not alert and it does not count.
     const failing = next.status === 'down' && !!next.lastResult?.error;
     setShown(error, failing);
     if (failing) {
@@ -305,7 +326,7 @@ function reorder(host, desired) {
 
 function renderMonitors(monitors) {
   const grid = $('#monitors');
-  const rank = { down: 0, pending: 1, up: 2, suppressed: 3, paused: 4 };
+  const rank = { down: 0, pending: 1, up: 2, maintenance: 3, suppressed: 4, paused: 5 };
   // Sorted on a copy: `monitors` is the same array as the lastMonitors global,
   // and rendering has no business reordering what the editor reads.
   const ordered = [...monitors].sort((a, b) => rank[a.status] - rank[b.status] || a.name.localeCompare(b.name));
@@ -349,6 +370,8 @@ function renderSummary(monitors, notificationsConfigured) {
   };
   add('up', count('up'));
   add('down', count('down'));
+  const inMaintenance = count('maintenance');
+  if (inMaintenance > 0) add('maintenance', inMaintenance);
   const suppressed = count('suppressed');
   if (suppressed > 0) add('suppressed', suppressed);
   add('paused', count('paused'));
@@ -535,7 +558,13 @@ async function submitLogin(event) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ password: $('#login-password').value }),
     });
-    if (!res.ok) throw new Error('Wrong password');
+    if (!res.ok) {
+      // Surface the server's reason. A 429 from the login rate limit is not a
+      // wrong password: telling someone with the correct password that it is
+      // wrong sends them chasing the one thing that is actually fine.
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || 'Wrong password');
+    }
     $('#login').classList.add('hidden');
     error.classList.add('hidden');
     start();
@@ -615,6 +644,8 @@ function renderImportReport(report) {
     'report-line warn',
   );
   line('Credentials to re-enter afterwards', report.needCredentials, 'report-line warn');
+  line('Add maintenance window', report.maintenanceCreated ?? []);
+  line('Update maintenance window', report.maintenanceUpdated ?? []);
   for (const message of report.errors) host.appendChild(el('p', 'report-line error', message));
 
   if (host.childElementCount === 0) {
@@ -734,6 +765,167 @@ function start() {
   timer = setInterval(tick, REFRESH_MS);
 }
 
+// ------------------------------------------------------------- maintenance
+
+const WEEKDAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+/** "Mon, Thu" from the bitmask the API stores. */
+function weekdayLabel(mask) {
+  const days = WEEKDAY_NAMES.filter((_, i) => (mask & (1 << i)) !== 0);
+  return days.length === 7 ? 'Every day' : days.join(', ');
+}
+
+function windowSummary(w) {
+  if (w.strategy === 'once') {
+    return `${new Date(w.startsAt).toLocaleString()} until ${new Date(w.endsAt).toLocaleString()}`;
+  }
+  const hh = String(Math.floor(w.startMin / 60)).padStart(2, '0');
+  const mm = String(w.startMin % 60).padStart(2, '0');
+  const zone = w.timezone || 'server time';
+  return `${weekdayLabel(w.weekdays)} at ${hh}:${mm} ${zone}, for ${duration(w.durationS * 1000)}`;
+}
+
+/** Only the strategy's own fieldset is shown, matching the union the API takes. */
+function syncMaintenanceStrategy() {
+  const form = $('#maintenance-form');
+  const weekly = form.elements.strategy.value === 'weekly';
+  for (const node of form.querySelectorAll('.weekly-only')) node.classList.toggle('hidden', !weekly);
+  for (const node of form.querySelectorAll('.once-only')) node.classList.toggle('hidden', weekly);
+}
+
+function renderMaintenanceList(windows) {
+  const host = $('#maintenance-list');
+  host.replaceChildren();
+
+  if (windows.length === 0) {
+    host.append(el('p', 'hint', 'No windows yet. Add one below.'));
+    return;
+  }
+
+  const names = new Map(lastMonitors.map((m) => [m.id, m.name]));
+  for (const w of windows) {
+    const row = el('div', 'mw-row');
+    const text = el('div', 'mw-text');
+    text.append(el('b', null, w.name), el('span', 'mw-when', windowSummary(w)));
+
+    const covers = w.monitorIds.map((id) => names.get(id) ?? `#${id}`);
+    text.append(el('span', 'mw-covers', covers.length ? `Covers ${covers.join(', ')}` : 'Covers nothing yet'));
+    if (!w.active) text.append(el('span', 'mw-off', 'Switched off'));
+
+    const toggle = el('button', 'tiny ghost', w.active ? 'Switch off' : 'Switch on');
+    toggle.onclick = async () => {
+      try {
+        await api(`/api/maintenance/${w.id}`, { method: 'PATCH', body: JSON.stringify({ active: !w.active }) });
+        await openMaintenance();
+        await refresh();
+      } catch (err) {
+        banner(err.message, 'err');
+      }
+    };
+
+    const remove = el('button', 'tiny ghost danger', 'Delete');
+    remove.onclick = async () => {
+      if (!confirm(`Delete "${w.name}"? Checks it covered start counting towards uptime again.`)) return;
+      try {
+        await api(`/api/maintenance/${w.id}`, { method: 'DELETE' });
+        await openMaintenance();
+        await refresh();
+      } catch (err) {
+        banner(err.message, 'err');
+      }
+    };
+
+    const actions = el('div', 'mw-actions');
+    actions.append(toggle, remove);
+    row.append(text, actions);
+    host.append(row);
+  }
+}
+
+async function openMaintenance() {
+  const form = $('#maintenance-form');
+  $('#maintenance-error').classList.add('hidden');
+
+  const picker = form.elements.monitorIds;
+  const chosen = new Set([...picker.selectedOptions].map((o) => o.value));
+  picker.replaceChildren();
+  for (const m of [...lastMonitors].sort((a, b) => a.name.localeCompare(b.name))) {
+    const option = el('option', null, m.name);
+    option.value = String(m.id);
+    // Rebuilt on every open and after every write, so a selection the user
+    // made but has not submitted has to be put back.
+    option.selected = chosen.has(option.value);
+    picker.append(option);
+  }
+
+  syncMaintenanceStrategy();
+
+  try {
+    renderMaintenanceList(await api('/api/maintenance'));
+  } catch (err) {
+    banner(err.message, 'err');
+    return;
+  }
+
+  if (!$('#maintenance').open) $('#maintenance').showModal();
+}
+
+/** A datetime-local value is wall-clock in the browser's zone; Date parses it as such. */
+function localInputToEpoch(value) {
+  const ms = new Date(value).getTime();
+  return Number.isNaN(ms) ? null : ms;
+}
+
+async function saveMaintenance(event) {
+  event.preventDefault();
+  const form = $('#maintenance-form');
+  const error = $('#maintenance-error');
+  error.classList.add('hidden');
+
+  const body = {
+    name: form.elements.name.value.trim(),
+    strategy: form.elements.strategy.value,
+    timezone: form.elements.timezone.value.trim(),
+    active: true,
+    monitorIds: [...form.elements.monitorIds.selectedOptions].map((o) => Number(o.value)),
+  };
+
+  if (body.strategy === 'weekly') {
+    const mask = [...form.querySelectorAll('input[name="weekday"]:checked')]
+      .reduce((acc, box) => acc | (1 << Number(box.value)), 0);
+    if (mask === 0) {
+      error.textContent = 'Pick at least one day.';
+      error.classList.remove('hidden');
+      return;
+    }
+    const [hours, minutes] = form.elements.startTime.value.split(':').map(Number);
+    body.weekdays = mask;
+    body.startMin = (hours || 0) * 60 + (minutes || 0);
+    body.durationS = Number(form.elements.durationMin.value) * 60;
+  } else {
+    const startsAt = localInputToEpoch(form.elements.startsAt.value);
+    const endsAt = localInputToEpoch(form.elements.endsAt.value);
+    if (startsAt === null || endsAt === null) {
+      error.textContent = 'Give both a start and an end.';
+      error.classList.remove('hidden');
+      return;
+    }
+    body.startsAt = startsAt;
+    body.endsAt = endsAt;
+  }
+
+  try {
+    await api('/api/maintenance', { method: 'POST', body: JSON.stringify(body) });
+    form.reset();
+    await openMaintenance();
+    await refresh();
+    banner('Maintenance window added', 'ok');
+  } catch (err) {
+    error.textContent = err.message;
+    error.classList.remove('hidden');
+  }
+}
+
 $('#btn-add').onclick = () => openEditor(null);
 $('#editor-cancel').onclick = () => $('#editor').close();
 $('#editor-form').addEventListener('submit', saveEditor);
@@ -747,6 +939,11 @@ $('#btn-export').onclick = () => {
 };
 $('#export-cancel').onclick = () => $('#export').close();
 $('#export-form').addEventListener('submit', doExport);
+
+$('#btn-maintenance').onclick = () => openMaintenance().catch((err) => banner(err.message, 'err'));
+$('#maintenance-cancel').onclick = () => $('#maintenance').close();
+$('#maintenance-form').addEventListener('submit', saveMaintenance);
+$('#maintenance-form').elements.strategy.addEventListener('change', syncMaintenanceStrategy);
 
 $('#btn-import').onclick = openImport;
 $('#import-cancel').onclick = () => $('#import').close();

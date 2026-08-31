@@ -12,6 +12,7 @@ process.env.AUTH_PASSWORD = '';
 // Imported after env is set: config and the database are read at module load.
 const { buildServer } = await import('../src/server.ts');
 const store = await import('../src/db.ts');
+const { scheduler } = await import('../src/scheduler.ts');
 
 let app: Awaited<ReturnType<typeof buildServer>>;
 
@@ -72,6 +73,19 @@ test('test-notification fails loudly when no channel is configured', async () =>
   const res = await app.inject({ method: 'POST', url: '/api/test-notification', payload: {} });
   assert.equal(res.statusCode, 400);
   assert.match(res.json().error, /NTFY_TOPIC/);
+});
+
+test('test-notification refuses an unknown monitorId instead of testing a placeholder', async () => {
+  // The placeholder subject (name "uptime-sentinel", target localhost) exists
+  // for the no-argument "test the wiring" case. An explicit monitorId that
+  // matches nothing used to fall through to it and return 200.
+  const res = await app.inject({
+    method: 'POST',
+    url: '/api/test-notification',
+    payload: { monitorId: 999999 },
+  });
+  assert.equal(res.statusCode, 404);
+  assert.match(res.json().error, /not found/i);
 });
 
 test('manual checks are refused for paused monitors', async () => {
@@ -252,6 +266,18 @@ test('/api/status batches history, uptime windows and open incidents', async () 
   store.insertCheck(b.id, { ok: true, statusCode: 200, latencyMs: 5, error: null }, now - 1000);
 
   store.createIncident(a.id, now - 2500, 'boom');
+  // An open incident means the monitor is down (this is what rehydrate()
+  // restores after a restart); plant that state so the response reflects it.
+  scheduler['states'].set(a.id, {
+    status: 'down',
+    consecutiveFailures: 1,
+    firstFailureAt: now - 2500,
+    lastResult: { ok: false, statusCode: 500, latencyMs: null, error: 'boom' },
+    lastCheckedAt: now - 1000,
+    nextCheckAt: null,
+    inFlight: false,
+    suppressedBy: null,
+  });
 
   const status = (await app.inject({ method: 'GET', url: '/api/status' })).json();
   const byName = new Map(status.monitors.map((m: { name: string }) => [m.name, m]));

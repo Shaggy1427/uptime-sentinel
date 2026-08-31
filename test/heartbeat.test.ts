@@ -99,6 +99,32 @@ test('an unreachable endpoint never throws either', async () => {
   assert.equal(hb.status().lastPingOk, false);
 });
 
+test('a slow heartbeat does not start overlapping requests', async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  let release!: () => void;
+
+  globalThis.fetch = async () => {
+    calls++;
+    return new Promise<Response>((resolve) => {
+      release = () => resolve(new Response(null, { status: 200 }));
+    });
+  };
+
+  try {
+    const hb = build({ activeMonitors: 0, lastCheckAt: null, slowestIntervalS: 60 });
+    const first = hb.tick();
+    const overlapping = hb.tick();
+
+    assert.equal(calls, 1, 'the second interval must reuse the in-flight ping');
+    release();
+    await Promise.all([first, overlapping]);
+    assert.equal(hb.status().lastPingOk, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('disabled, and start() is inert, when the URL is empty', async () => {
   const hb = build({ activeMonitors: 1, lastCheckAt: NOW, slowestIntervalS: 60 }, { url: '' });
   assert.equal(hb.enabled, false);
