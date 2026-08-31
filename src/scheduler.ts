@@ -63,6 +63,26 @@ function freshState(): RuntimeState {
   };
 }
 
+/** Whether a completed result still describes the monitor now in storage. */
+function sameCheckDefinition(before: Monitor, after: Monitor): boolean {
+  return (
+    before.name === after.name &&
+    before.type === after.type &&
+    before.target === after.target &&
+    before.timeoutMs === after.timeoutMs &&
+    before.acceptedStatus === after.acceptedStatus &&
+    before.keyword === after.keyword &&
+    before.keywordInverted === after.keywordInverted &&
+    before.ignoreTls === after.ignoreTls &&
+    before.method === after.method &&
+    JSON.stringify(before.headers) === JSON.stringify(after.headers) &&
+    before.jsonPath === after.jsonPath &&
+    before.jsonOperator === after.jsonOperator &&
+    before.jsonExpected === after.jsonExpected &&
+    before.parentId === after.parentId
+  );
+}
+
 export class Scheduler {
   private states = new Map<number, RuntimeState>();
   private timers = new Map<number, NodeJS.Timeout>();
@@ -372,6 +392,15 @@ export class Scheduler {
       // is still returned to the caller (e.g. runNow).
       const current = getMonitor(monitor.id);
       if (!current) return result;
+
+      // Definition edits invalidate a result already in flight. Otherwise a
+      // failure from the old target can be stored, open an incident and send a
+      // DOWN alert carrying the new name/target. Preserve the deliberate
+      // pause-during-check behaviour below: a pause transition still records
+      // the row for history, but never changes incidents or alerts.
+      if (!sameCheckDefinition(monitor, current) && current.paused === monitor.paused) {
+        return result;
+      }
 
       // Resolved against the same `now` the row is stamped with, so a window
       // that opens mid-check cannot tag the row and then be judged closed.
