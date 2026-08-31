@@ -254,6 +254,35 @@ export async function buildServer() {
     return reply.code(401).send({ error: 'Unauthorized' });
   });
 
+  // A simple cross-origin form can send text/plain but not application/json,
+  // so body-bearing writes must use the same JSON media type as the API. When
+  // a browser supplies Origin, require the complete origin (scheme, host and
+  // port) to match Fastify's proxy-aware view of this request. Origin remains
+  // optional so curl, monitoring tools and older same-origin clients work.
+  app.addHook('preHandler', async (req, reply) => {
+    const method = req.method.toUpperCase();
+    if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return;
+
+    // Inspect the parsed body rather than Content-Length: HTTP/1.1 chunked and
+    // HTTP/2 requests can carry bodies without that header.
+    if (req.body !== undefined && req.mediaType !== 'application/json') {
+      return reply.code(415).send({ error: 'Content-Type must be application/json' });
+    }
+
+    const origin = req.headers.origin;
+    if (typeof origin === 'string' && origin !== '') {
+      try {
+        const parsedOrigin = new URL(origin);
+        const requestOrigin = new URL(`${req.protocol}://${req.host}`).origin;
+        if (parsedOrigin.origin !== origin || parsedOrigin.origin !== requestOrigin) {
+          return reply.code(403).send({ error: 'Cross-origin request blocked' });
+        }
+      } catch {
+        return reply.code(403).send({ error: 'Cross-origin request blocked' });
+      }
+    }
+  });
+
   app.setErrorHandler((err: FastifyError, _req, reply) => {
     if (err instanceof ValidationError) return reply.code(400).send({ error: err.message });
 
