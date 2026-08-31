@@ -26,6 +26,20 @@ function loadConfig(extra: Record<string, string>): Promise<{ code: number; stde
   });
 }
 
+test('PUBLIC_URL with non-ASCII characters is rejected at startup', async () => {
+  // undici refuses header values above latin-1, and PUBLIC_URL becomes the
+  // ntfy "Click" header: accepting this value would make every notification
+  // throw instead of failing fast where the operator can see it.
+  const { code, stderr } = await loadConfig({ PUBLIC_URL: 'https://例え.jp/パス' });
+  assert.equal(code, 1);
+  assert.match(stderr, /printable ASCII/);
+});
+
+test('PUBLIC_URL still accepts ordinary http(s) URLs', async () => {
+  const { code, stderr } = await loadConfig({ PUBLIC_URL: 'https://raspberrypi.local:8080/status/' });
+  assert.equal(code, 0, stderr);
+});
+
 test('integer env vars reject values Number.parseInt would silently truncate', async () => {
   for (const [key, value] of [
     ['RETENTION_DAYS', '30abc'],

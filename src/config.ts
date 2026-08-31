@@ -56,6 +56,14 @@ function publicUrl(key: string): string {
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     throw new Error(`Env ${key} must be an http(s) URL, got "${v}"`);
   }
+  // Header values must be ByteString (latin-1). This URL becomes the ntfy
+  // "Click" header, and undici rejects any header value with a character
+  // above 255 -- so a unicode hostname or path here would make every
+  // notification throw and silently kill all alerting. Fail at startup,
+  // where the mistake is obvious, instead of on every alert, where it is not.
+  if (!/^[\x21-\x7E]*$/.test(v)) {
+    throw new Error(`Env ${key} must contain only printable ASCII characters, got "${v}"`);
+  }
   return v.replace(/\/+$/, '');
 }
 
