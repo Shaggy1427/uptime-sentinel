@@ -6,17 +6,23 @@ import {
   getMonitor,
   insertCheck,
   listMonitors,
+  listMonitorsUnsorted,
+  listOpenIncidents,
   markIncidentAlerted,
   markIncidentReminded,
   openIncidentFor,
   pruneChecks,
   resolveIncident,
+  rulesCovering,
   db,
 } from './db.ts';
 import { runCheck } from './checks/index.ts';
 import { dispatch } from './notify/index.ts';
 import { config } from './config.ts';
-import type { CheckResult, Monitor, MonitorStatus } from './types.ts';
+import { openRule } from './maintenance.ts';
+import { explain, policyFor } from './suppression.ts';
+import type { Suppression } from './suppression.ts';
+import type { CheckResult, Incident, Monitor, MonitorStatus } from './types.ts';
 
 interface RuntimeState {
   status: MonitorStatus;
@@ -29,7 +35,20 @@ interface RuntimeState {
   inFlight: boolean;
   /** Id of the ancestor currently blocking this monitor's checks. */
   suppressedBy: number | null;
+  /** The maintenance window currently covering this monitor, if any. */
+  maintenance: { id: number; name: string } | null;
 }
+
+/**
+ * Threshold for whether to run VACUUM after a prune. Two conditions must hold:
+ * the freelist must be at least `MIN_VACUUM_PAGES` pages and at least
+ * `MIN_VACUUM_FRACTION` of the file. The absolute floor protects small
+ * installs (4 MB of free space on a 50 MB database is a clear win; the same
+ * 4 MB on a 5 MB database is the whole file); the relative floor protects
+ * the prune that just freed a handful of rows from a busy install.
+ */
+const MIN_VACUUM_PAGES = 1024;
+const MIN_VACUUM_FRACTION = 0.05;
 
 function freshState(): RuntimeState {
   return {
@@ -41,7 +60,28 @@ function freshState(): RuntimeState {
     nextCheckAt: null,
     inFlight: false,
     suppressedBy: null,
+    maintenance: null,
   };
+}
+
+/** Whether a completed result still describes the monitor now in storage. */
+function sameCheckDefinition(before: Monitor, after: Monitor): boolean {
+  return (
+    before.name === after.name &&
+    before.type === after.type &&
+    before.target === after.target &&
+    before.timeoutMs === after.timeoutMs &&
+    before.acceptedStatus === after.acceptedStatus &&
+    before.keyword === after.keyword &&
+    before.keywordInverted === after.keywordInverted &&
+    before.ignoreTls === after.ignoreTls &&
+    before.method === after.method &&
+    JSON.stringify(before.headers) === JSON.stringify(after.headers) &&
+    before.jsonPath === after.jsonPath &&
+    before.jsonOperator === after.jsonOperator &&
+    before.jsonExpected === after.jsonExpected &&
+    before.parentId === after.parentId
+  );
 }
 
 export class Scheduler {
@@ -49,6 +89,14 @@ export class Scheduler {
   private timers = new Map<number, NodeJS.Timeout>();
   private pruneTimer: NodeJS.Timeout | null = null;
   private running = false;
+  /**
+   * Monitor-derived health stats, recomputed by sync() from the list it
+   * already holds. sync() runs after every CRUD, so this is current at the
+   * only moments the monitor set can change; health() then serves heartbeat
+   * ticks without a fresh query. Null until the first sync, in which case
+   * health() falls back to computing it (tests drive monitors directly).
+   */
+  private monitorStats: { activeMonitors: number; slowestIntervalS: number } | null = null;
 
   start(): void {
     this.running = true;
@@ -68,12 +116,22 @@ export class Scheduler {
 
   /** Restore DOWN state across restarts so an open incident is not re-alerted from zero. */
   private rehydrate(): void {
-    for (const monitor of listMonitors()) {
+    // One scan for every open incident, instead of one query per monitor.
+    // /api/status already does this; the startup path that should mirror it
+    // was still paying N+1.
+    const incidentByMonitor = new Map<number, Incident>();
+    for (const incident of listOpenIncidents()) {
+      // listOpenIncidents is newest-first, so the first one seen per monitor is
+      // the one openIncidentFor would have returned.
+      if (!incidentByMonitor.has(incident.monitorId)) incidentByMonitor.set(incident.monitorId, incident);
+    }
+
+    for (const monitor of listMonitorsUnsorted()) {
       const state = freshState();
       if (monitor.paused) {
         state.status = 'paused';
       } else {
-        const incident = openIncidentFor(monitor.id);
+        const incident = incidentByMonitor.get(monitor.id);
         if (incident) {
           state.status = 'down';
           state.firstFailureAt = incident.startedAt;
@@ -91,7 +149,7 @@ export class Scheduler {
     // (a paused monitor's incident, the failure streak) must run either way, or
     // a pause applied before start() -- or in a test that never calls it -- would
     // leave a stale open incident behind.
-    const monitors = listMonitors();
+    const monitors = listMonitorsUnsorted();
     const live = new Set(monitors.map((m) => m.id));
 
     for (const [id, timer] of this.timers) {
@@ -120,12 +178,17 @@ export class Scheduler {
         // the first check after a resume computes downtime from the original
         // startedAt -- the whole paused span -- and emits a RECOVERED (or a
         // late DOWN) citing hours that were just the monitor sitting paused.
-        if (state.status === 'down') {
-          const incident = openIncidentFor(monitor.id);
-          if (incident) {
-            resolveIncident(incident.id, Date.now());
-            console.log(`[scheduler] "${monitor.name}" paused with an open incident; closed it silently`);
-          }
+        //
+        // Decided on the database, not the in-memory status: an incident can
+        // be open while the status is anything but 'down' -- handleUp leaves
+        // it open when every RECOVERED dispatch failed, and a monitor whose
+        // ancestor died mid-outage flips to 'suppressed' with the incident
+        // still open. Gating on state.status === 'down' left those incidents
+        // open across the pause.
+        const incident = openIncidentFor(monitor.id);
+        if (incident) {
+          resolveIncident(incident.id, Date.now());
+          console.log(`[scheduler] "${monitor.name}" paused with an open incident; closed it silently`);
         }
 
         state.status = 'paused';
@@ -138,8 +201,34 @@ export class Scheduler {
       }
 
       if (state.status === 'paused') state.status = 'pending';
-      if (this.running && !this.timers.has(monitor.id)) this.schedule(monitor, this.startupJitter(monitor));
+      if (this.running && !this.timers.has(monitor.id)) {
+        this.schedule(monitor, this.startupJitter(monitor));
+      } else if (this.running && state.nextCheckAt !== null) {
+        // A pending timer carries the interval it was scheduled with. If the
+        // monitor's interval has since been lowered, that timer would keep
+        // firing on the old cadence for up to a full old cycle -- a 24h
+        // monitor changed to 60s would not be checked any sooner for 24h,
+        // and the dashboard's nextCheckAt would sit there agreeing with it.
+        // sync() runs exactly when configuration changes, so pull the next
+        // check back to the new interval. Raising the interval needs no such
+        // correction: the pending check fires soon enough, and the tick
+        // schedules the longer interval from then on.
+        const pendingMs = state.nextCheckAt - Date.now();
+        if (pendingMs > monitor.intervalS * 1000) this.schedule(monitor, monitor.intervalS * 1000);
+      }
     }
+
+    // The heartbeat reads health() on every tick; the parts of it that come
+    // from the monitor list only change here, so fold the computation into
+    // the walk sync() was already doing.
+    let slowestIntervalS = 0;
+    let activeMonitors = 0;
+    for (const monitor of monitors) {
+      if (monitor.paused) continue;
+      activeMonitors++;
+      if (monitor.intervalS > slowestIntervalS) slowestIntervalS = monitor.intervalS;
+    }
+    this.monitorStats = { activeMonitors, slowestIntervalS: slowestIntervalS || 60 };
   }
 
   /** Spread first checks out so 20 monitors don't all fire in the same tick. */
@@ -173,6 +262,11 @@ export class Scheduler {
    * no request, no stored result, no incident, no notification.
    */
   private suppressor(monitor: Monitor, all?: Monitor[]): Monitor | null {
+    // A monitor with no parent has no ancestors, so there is nothing to walk.
+    // Answering without calling ancestorsOf keeps the common case -- standalone
+    // monitors, which are most of them -- free of the O(N) id map that the
+    // walk builds from the monitor list on every single tick.
+    if (monitor.parentId === null) return null;
     for (const ancestor of ancestorsOf(monitor.id, all)) {
       if (ancestor.paused) continue;
       if (this.states.get(ancestor.id)?.status === 'down') return ancestor;
@@ -180,11 +274,35 @@ export class Scheduler {
     return null;
   }
 
-  /** Names of the monitors this one is standing in for, for a grouped alert. */
-  private suppressedNames(monitor: Monitor): string[] {
-    return descendantsOf(monitor.id)
+  /**
+   * Names of the monitors this one is standing in for, for a grouped alert.
+   *
+   * `monitors` is the snapshot the caller already holds; without it this
+   * triggers a full listMonitors query in the middle of alert dispatch.
+   */
+  private suppressedNames(monitor: Monitor, monitors?: Monitor[]): string[] {
+    return descendantsOf(monitor.id, monitors)
       .filter((m) => !m.paused)
       .map((m) => m.name);
+  }
+
+  /** The dependency block, if any, in the shared suppression vocabulary. */
+  private dependencySuppression(monitor: Monitor, all?: Monitor[]): Suppression | null {
+    const ancestor = this.suppressor(monitor, all);
+    return ancestor === null ? null : { reason: 'dependency', by: { id: ancestor.id, name: ancestor.name } };
+  }
+
+  /**
+   * The maintenance window covering this monitor at `now`, if one is open.
+   *
+   * One indexed query per tick. Deliberately not hoisted into a cache
+   * refreshed by `sync()`: windows open and close on wall-clock time rather
+   * than on a CRUD event, so a cache would need its own timer to stay honest
+   * and would still be wrong for the width of that timer.
+   */
+  private maintenanceSuppression(monitor: Monitor, now: number): Suppression | null {
+    const rule = openRule(rulesCovering(monitor.id), now);
+    return rule === null ? null : { reason: 'maintenance', by: { id: rule.id, name: rule.name } };
   }
 
   private async tick(monitorId: number): Promise<void> {
@@ -194,15 +312,25 @@ export class Scheduler {
       return;
     }
 
-    const blockedBy = this.suppressor(monitor);
-    if (blockedBy) {
+    // One monitor-list snapshot for the whole tick. suppressor and the alert
+    // paths each used to trigger their own listMonitors query; the graph is
+    // not going to change in the microseconds between them, and after the
+    // check the snapshot is only used to name dependents in an alert, where
+    // a few seconds of staleness is cosmetic.
+    const monitors = listMonitors();
+
+    // Dependencies are judged before maintenance: while an ancestor is down
+    // the result is unknowable, so there is nothing for a window to excuse.
+    const blocked = this.dependencySuppression(monitor, monitors);
+    if (blocked && !policyFor(blocked.reason).records) {
       const state = this.states.get(monitor.id) ?? freshState();
       this.states.set(monitor.id, state);
-      state.status = 'suppressed';
-      state.suppressedBy = blockedBy.id;
+      state.status = policyFor(blocked.reason).status;
+      state.suppressedBy = blocked.by.id;
       // Deliberately no check, no stored result: an unreachable dependency
       // makes the answer unknowable, and recording a failure would both spam
       // alerts and corrupt the uptime figure with an outage that is not ours.
+      // Maintenance is the other case -- see execute(), which still records.
       if (this.running) this.schedule(monitor, monitor.intervalS * 1000);
       return;
     }
@@ -210,7 +338,7 @@ export class Scheduler {
       this.states.get(monitor.id)!.suppressedBy = null;
     }
 
-    await this.execute(monitor);
+    await this.execute(monitor, monitors);
     // Re-read after the (possibly long) check: the monitor may have been
     // paused or deleted while the check was in flight, in which case the
     // stale snapshot must not resurrect its timer.
@@ -227,24 +355,24 @@ export class Scheduler {
     // meaningless. The scheduled path skips it entirely; a manual check must do
     // the same, or it records a not-our-fault failure into the uptime figure and
     // fires a DOWN alert for something the operator already knows about.
-    const blockedBy = this.suppressor(monitor);
-    if (blockedBy) {
+    const monitors = listMonitors();
+    const blocked = this.dependencySuppression(monitor, monitors);
+    if (blocked && !policyFor(blocked.reason).records) {
       const state = this.states.get(monitor.id) ?? freshState();
       this.states.set(monitor.id, state);
-      state.status = 'suppressed';
-      state.suppressedBy = blockedBy.id;
-      return {
-        ok: false,
-        statusCode: null,
-        latencyMs: null,
-        error: `Not checked: "${blockedBy.name}" is down`,
-      };
+      state.status = policyFor(blocked.reason).status;
+      state.suppressedBy = blocked.by.id;
+      return { ok: false, statusCode: null, latencyMs: null, error: explain(blocked) };
     }
 
-    return this.execute(monitor);
+    // A manual check during maintenance is allowed and is recorded, tagged
+    // like any other: the operator asking "is it back yet" mid-window is
+    // exactly who this feature is for. execute() keeps it out of the uptime
+    // figure and out of the alert path.
+    return this.execute(monitor, monitors);
   }
 
-  private async execute(monitor: Monitor): Promise<CheckResult> {
+  private async execute(monitor: Monitor, monitors?: Monitor[]): Promise<CheckResult> {
     const state = this.states.get(monitor.id) ?? freshState();
     this.states.set(monitor.id, state);
 
@@ -266,8 +394,22 @@ export class Scheduler {
       const current = getMonitor(monitor.id);
       if (!current) return result;
 
+      // Definition edits invalidate a result already in flight. Otherwise a
+      // failure from the old target can be stored, open an incident and send a
+      // DOWN alert carrying the new name/target. Preserve the deliberate
+      // pause-during-check behaviour below: a pause transition still records
+      // the row for history, but never changes incidents or alerts.
+      if (!sameCheckDefinition(monitor, current) && current.paused === monitor.paused) {
+        return result;
+      }
+
+      // Resolved against the same `now` the row is stamped with, so a window
+      // that opens mid-check cannot tag the row and then be judged closed.
+      const maintenance = this.maintenanceSuppression(current, now);
+      state.maintenance = maintenance === null ? null : maintenance.by;
+
       try {
-        insertCheck(current.id, result, now);
+        insertCheck(current.id, result, now, maintenance === null ? null : maintenance.by.id);
         state.lastResult = result;
         state.lastCheckedAt = now;
 
@@ -275,8 +417,13 @@ export class Scheduler {
         // monitor as inert and do not open/resolve incidents or send alerts.
         if (current.paused) return result;
 
-        if (result.ok) await this.handleUp(current, state, now);
-        else await this.handleDown(current, state, result, now);
+        if (maintenance !== null) {
+          this.holdForMaintenance(current, state, maintenance, now);
+          return result;
+        }
+
+        if (result.ok) await this.handleUp(current, state, now, monitors);
+        else await this.handleDown(current, state, result, now, monitors);
       } catch (err) {
         console.error(`[scheduler] post-check handling failed for "${current.name}":`, err);
       }
@@ -287,7 +434,45 @@ export class Scheduler {
     }
   }
 
-  private async handleUp(monitor: Monitor, state: RuntimeState, now: number): Promise<void> {
+  /**
+   * Hold a monitor inert for the length of a maintenance window.
+   *
+   * The check ran and the row is stored -- tagged, so it never reaches the
+   * uptime figure -- but nothing else happens: no incident is opened, no
+   * alert is dispatched, and no reminder fires.
+   *
+   * Any incident already open is closed silently, mirroring what pausing
+   * does and for the same reason. Left open, it would go on accruing across
+   * the window, and the first check after the window closed would compute
+   * downtime from the original startedAt and emit a RECOVERED citing hours
+   * that were scheduled. Silent because the outage was expected, not fixed.
+   *
+   * The failure streak is dropped for the same reason: the window should end
+   * with the monitor judged from scratch, so the first real failure after it
+   * opens a fresh incident with an honest startedAt.
+   */
+  private holdForMaintenance(
+    monitor: Monitor,
+    state: RuntimeState,
+    maintenance: Suppression,
+    now: number,
+  ): void {
+    state.status = policyFor(maintenance.reason).status;
+
+    const incident = openIncidentFor(monitor.id);
+    if (incident) {
+      resolveIncident(incident.id, now);
+      console.log(
+        `[scheduler] "${monitor.name}" entered maintenance "${maintenance.by.name}" ` +
+          'with an open incident; closed it silently',
+      );
+    }
+
+    state.consecutiveFailures = 0;
+    state.firstFailureAt = null;
+  }
+
+  private async handleUp(monitor: Monitor, state: RuntimeState, now: number, monitors?: Monitor[]): Promise<void> {
     const incident = openIncidentFor(monitor.id);
     state.consecutiveFailures = 0;
     state.firstFailureAt = null;
@@ -309,7 +494,7 @@ export class Scheduler {
       reason: null,
       downForMs: now - incident.startedAt,
       at: now,
-      suppressed: this.suppressedNames(monitor),
+      suppressed: this.suppressedNames(monitor, monitors),
     });
 
     // Mirror the DOWN path: only close the incident once the RECOVERED alert
@@ -331,12 +516,19 @@ export class Scheduler {
     state: RuntimeState,
     result: CheckResult,
     now: number,
+    monitors?: Monitor[],
   ): Promise<void> {
     state.consecutiveFailures += 1;
     if (state.firstFailureAt === null) state.firstFailureAt = now;
 
-    // Not enough consecutive failures yet - treat as a blip, stay quiet.
-    if (state.consecutiveFailures < Math.max(1, monitor.retries)) {
+    // Not enough consecutive failures yet - treat as a blip, stay quiet --
+    // unless the monitor is already marked down. That combination can only
+    // come from rehydrate(): an incident that was open at shutdown, whose
+    // restored streak (incident.checksFailed) is shorter than a `retries`
+    // value raised while the outage was in flight. The monitor IS down and
+    // its alerts are mid-flight; degrading to 'pending' would stall the
+    // reminders and misreport the outage until the streak rebuilt.
+    if (state.consecutiveFailures < Math.max(1, monitor.retries) && state.status !== 'down') {
       state.status = 'pending';
       return;
     }
@@ -362,7 +554,7 @@ export class Scheduler {
           reason: result.error,
           downForMs,
           at: now,
-          suppressed: this.suppressedNames(monitor),
+          suppressed: this.suppressedNames(monitor, monitors),
         });
         // Only record the alert once it was actually delivered somewhere.
         // Otherwise the next failing check retries, so a momentary ntfy
@@ -386,7 +578,7 @@ export class Scheduler {
           reason: result.error,
           downForMs,
           at: now,
-          suppressed: this.suppressedNames(monitor),
+          suppressed: this.suppressedNames(monitor, monitors),
         });
         if (results.some((r) => r.ok)) {
           markIncidentReminded(incident.id, now);
@@ -405,10 +597,25 @@ export class Scheduler {
     console.log(`[prune] removed ${removed} check rows older than ${config.retentionDays}d`);
 
     // Reclaim the freed pages so the file does not sit at its high-water mark
-    // forever. Only worth the full-file rewrite when a prune actually deleted
-    // rows, and it must never take the scheduler down: VACUUM needs a moment of
-    // exclusive access and scratch disk space, neither guaranteed on a Pi.
+    // forever. Only worth the full-file rewrite when the freelist is a
+    // noticeable fraction of the file: VACUUM rewrites the whole database
+    // whether there is one page to free or ten thousand, and the cost is paid
+    // on a Pi SD card where write throughput is the bottleneck. A small prune
+    // of a few hundred rows on a busy install only frees a handful of pages;
+    // rebuilding a 50 MB database to free 400 KB is not worth the I/O.
     try {
+      const free = Number(
+        (db.prepare('PRAGMA freelist_count').get() as { freelist_count: number }).freelist_count,
+      );
+      const total = Number((db.prepare('PRAGMA page_count').get() as { page_count: number }).page_count);
+      const fraction = total > 0 ? free / total : 0;
+      if (free < MIN_VACUUM_PAGES || fraction < MIN_VACUUM_FRACTION) {
+        console.log(
+          `[prune] skipping VACUUM: ${free} free pages of ${total} ` +
+            `(${(fraction * 100).toFixed(1)}%) is below the threshold`,
+        );
+        return;
+      }
       db.exec('VACUUM');
     } catch (err) {
       console.warn(`[prune] VACUUM skipped: ${(err as Error).message}`);
@@ -421,7 +628,12 @@ export class Scheduler {
    * scheduler has stalled is still broken.
    */
   health(): { activeMonitors: number; lastCheckAt: number | null; slowestIntervalS: number } {
-    const active = listMonitors().filter((m) => !m.paused);
+    // monitorStats is refreshed by sync(), which runs after every CRUD, so
+    // the cached values are current whenever the monitor set has changed.
+    // The fallback covers callers that never went through sync (tests that
+    // create monitors directly).
+    const { activeMonitors, slowestIntervalS } =
+      this.monitorStats ?? this.computeMonitorStats();
 
     let lastCheckAt: number | null = null;
     for (const state of this.states.values()) {
@@ -429,8 +641,18 @@ export class Scheduler {
       if (lastCheckAt === null || state.lastCheckedAt > lastCheckAt) lastCheckAt = state.lastCheckedAt;
     }
 
-    const slowestIntervalS = active.reduce((max, m) => Math.max(max, m.intervalS), 0) || 60;
-    return { activeMonitors: active.length, lastCheckAt, slowestIntervalS };
+    return { activeMonitors, lastCheckAt, slowestIntervalS };
+  }
+
+  private computeMonitorStats(): { activeMonitors: number; slowestIntervalS: number } {
+    let slowestIntervalS = 0;
+    let activeMonitors = 0;
+    for (const m of listMonitorsUnsorted()) {
+      if (m.paused) continue;
+      activeMonitors++;
+      if (m.intervalS > slowestIntervalS) slowestIntervalS = m.intervalS;
+    }
+    return { activeMonitors, slowestIntervalS: slowestIntervalS || 60 };
   }
 
   getState(monitorId: number): RuntimeState | null {

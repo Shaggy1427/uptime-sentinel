@@ -9,12 +9,13 @@ import { config, VERSION } from './config.ts';
 import * as store from './db.ts';
 import { scheduler } from './scheduler.ts';
 import { dispatch } from './notify/index.ts';
-import { validateMonitor, ValidationError } from './validate.ts';
+import { validateMaintenance, validateMonitor, ValidationError } from './validate.ts';
 import type { ValidateOptions } from './validate.ts';
-import { cookieSecret, secretEquals } from './secret.ts';
+import { openRule } from './maintenance.ts';
+import { cookieSecret, passwordMatches } from './secret.ts';
 import { renderMetrics } from './metrics.ts';
 import { exportConfig, importConfig } from './config-io.ts';
-import type { Monitor, Incident, Check } from './types.ts';
+import type { Monitor, Incident } from './types.ts';
 
 const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 
@@ -23,7 +24,7 @@ const DAY = 86_400_000;
 /** Dependency-graph access handed to the validator; see ValidateOptions.graph. */
 const GRAPH: NonNullable<ValidateOptions['graph']> = store.graph;
 const AUTH_COOKIE = 'sentinel_auth';
-const OPEN_ROUTES = new Set(['/api/health', '/api/login', '/api/auth']);
+const OPEN_ROUTES = new Set(['/api/health', '/api/login']);
 
 /**
  * Monitor `headers` can hold credentials for the endpoint being monitored
@@ -70,9 +71,37 @@ interface StatusContext {
   monitors: Monitor[];
   byId: Map<number, Monitor>;
   openIncidentByMonitor: Map<number, Incident>;
-  historyByMonitor: Map<number, Check[]>;
+  historyByMonitor: Map<number, store.HistorySample[]>;
   /** Per monitor: [day, week, month] uptime, in that order. */
   uptimeByMonitor: Map<number, store.UptimeStats[]>;
+  /** Non-paused descendant count per monitor. Pre-baked so describe is O(1). */
+  dependentCountByMonitor: Map<number, number>;
+  /**
+   * The maintenance window open over each monitor right now.
+   *
+   * Built once from the whole window table rather than asked per monitor: the
+   * dashboard polls this every 10 seconds, and a query per monitor here is
+   * exactly what the O(1) rule exists to prevent.
+   */
+  maintenanceByMonitor: Map<number, { id: number; name: string }>;
+}
+
+/**
+ * monitorId -> the window covering it, for every monitor, in two queries.
+ *
+ * Windows are resolved here rather than read off the scheduler's state so a
+ * window that was just created shows on the very next poll, instead of only
+ * after each affected monitor has ticked.
+ */
+function openWindowsByMonitor(now: number): Map<number, { id: number; name: string }> {
+  const out = new Map<number, { id: number; name: string }>();
+  for (const window of store.listMaintenance()) {
+    if (!openRule([window], now)) continue;
+    for (const monitorId of window.monitorIds) {
+      if (!out.has(monitorId)) out.set(monitorId, { id: window.id, name: window.name });
+    }
+  }
+  return out;
 }
 
 /**
@@ -101,6 +130,8 @@ function contextForOne(monitor: Monitor): StatusContext {
         ],
       ],
     ]),
+    dependentCountByMonitor: store.descendantCountMap(monitors),
+    maintenanceByMonitor: openWindowsByMonitor(now),
   };
 }
 
@@ -110,7 +141,14 @@ function describe(monitor: Monitor, ctx: StatusContext) {
   const incident = monitor.paused ? null : (ctx.openIncidentByMonitor.get(monitor.id) ?? null);
 
   const checks = ctx.historyByMonitor.get(monitor.id) ?? [];
-  const history = checks.map((c) => ({ ok: c.ok, latencyMs: c.latencyMs, checkedAt: c.checkedAt }));
+  // maintenanceId rides along so the sparkline can draw a planned outage as
+  // planned rather than as a wall of failures.
+  const history = checks.map((c) => ({
+    ok: c.ok,
+    latencyMs: c.latencyMs,
+    checkedAt: c.checkedAt,
+    maintenanceId: c.maintenanceId,
+  }));
   // checks are oldest-first, so the last one is the most recent overall.
   const newestCheckAt = checks.length > 0 ? checks[checks.length - 1]!.checkedAt : null;
 
@@ -118,18 +156,39 @@ function describe(monitor: Monitor, ctx: StatusContext) {
   const blockedById = state?.suppressedBy ?? null;
   const [day, week, month] = ctx.uptimeByMonitor.get(monitor.id) ?? [];
 
+  // Read from the context, not from the scheduler's state, so a window that
+  // was created a second ago is reflected on this poll rather than after the
+  // monitor's next tick -- which on a 5-minute interval is a long time to sit
+  // watching a card that still says "down".
+  const maintenance = monitor.paused ? null : (ctx.maintenanceByMonitor.get(monitor.id) ?? null);
+  const liveStatus = state?.status ?? 'pending';
+
   return {
     ...redact(monitor),
-    status: monitor.paused ? 'paused' : (state?.status ?? 'pending'),
+    // Dependency suppression is evaluated before maintenance by the
+    // scheduler: while an ancestor is down the result is unknowable, whether
+    // or not this monitor also has a window open. Keep that priority here.
+    status: monitor.paused
+      ? 'paused'
+      : liveStatus === 'suppressed'
+        ? 'suppressed'
+        : maintenance
+          ? 'maintenance'
+          : liveStatus,
+    maintenance,
     parentName: parent?.name ?? null,
     // Named so the dashboard can say what a monitor is waiting on rather than
     // just showing it greyed out for no visible reason.
     suppressedBy: blockedById === null ? null : (byId.get(blockedById)?.name ?? null),
-    dependentCount: store.descendantsOf(monitor.id, monitors).filter((m) => !m.paused).length,
+    dependentCount: ctx.dependentCountByMonitor.get(monitor.id) ?? 0,
     lastResult: state?.lastResult ?? null,
     lastCheckedAt: state?.lastCheckedAt ?? newestCheckAt,
     nextCheckAt: state?.nextCheckAt ?? null,
-    downSinceMs: incident ? now - incident.startedAt : null,
+    // The downtime clock only runs while the monitor is actually down. An
+    // incident can stay open while checks pass (RECOVERED delivery still
+    // retrying) or while the monitor is suppressed by an ancestor -- reporting
+    // downtime then would describe an outage that is not happening.
+    downSinceMs: incident && state?.status === 'down' ? now - incident.startedAt : null,
     alerted: incident?.alertedAt !== null && incident !== null,
     incident,
     history,
@@ -185,7 +244,7 @@ export async function buildServer() {
     if (OPEN_ROUTES.has(route)) return;
 
     const bearer = req.headers.authorization?.replace(/^Bearer\s+/i, '');
-    if (bearer && secretEquals(bearer, config.authPassword)) return;
+    if (bearer && passwordMatches(bearer)) return;
 
     const raw = req.cookies[AUTH_COOKIE];
     if (raw) {
@@ -262,8 +321,6 @@ app.setErrorHandler((err: FastifyError, _req, reply) => {
 
   // ------------------------------------------------------------------ auth
 
-  app.get('/api/auth', async () => ({ required: authEnabled }));
-
   app.post(
     '/api/login',
     {
@@ -274,7 +331,7 @@ app.setErrorHandler((err: FastifyError, _req, reply) => {
     async (req, reply) => {
       if (!authEnabled) return { ok: true };
       const { password } = (req.body ?? {}) as { password?: string };
-      if (typeof password !== 'string' || !secretEquals(password, config.authPassword)) {
+      if (typeof password !== 'string' || !passwordMatches(password)) {
         return reply.code(401).send({ error: 'Wrong password' });
       }
       reply.setCookie(AUTH_COOKIE, 'ok', {
@@ -299,15 +356,33 @@ app.setErrorHandler((err: FastifyError, _req, reply) => {
   // ---------------------------------------------------------------- health
 
   app.get('/api/health', async () => {
+    // The endpoint is public so a third-party dead-man's-switch (healthchecks.io
+    // and the like) can poll it. Once AUTH_PASSWORD is set the operator has said
+    // this instance is not for public eyes: the exact version string is a
+    // CVE-cross-referencing aid (CWE-200) and the monitor counts are
+    // infrastructure detail a liveness probe has no use for. `ok` and `uptimeS`
+    // are all it needs to tell the process is alive, so stop there -- and before
+    // walking the monitor list, since an authed instance polls this often.
+    if (authEnabled) return { ok: true, uptimeS: Math.round(process.uptime()) };
+
     const monitors = store.listMonitors();
-    const down = monitors.filter((m) => !m.paused && scheduler.getState(m.id)?.status === 'down');
-    const suppressed = monitors.filter((m) => !m.paused && scheduler.getState(m.id)?.status === 'suppressed');
+    // One pass: each monitor is looked up once, paused ones are skipped
+    // without a state lookup, and we count down/suppressed as we go instead
+    // of allocating two intermediate arrays the way two .filter() calls would.
+    let down = 0;
+    let suppressed = 0;
+    for (const m of monitors) {
+      if (m.paused) continue;
+      const status = scheduler.getState(m.id)?.status;
+      if (status === 'down') down++;
+      else if (status === 'suppressed') suppressed++;
+    }
     return {
       ok: true,
       version: VERSION,
       monitors: monitors.length,
-      down: down.length,
-      suppressed: suppressed.length,
+      down,
+      suppressed,
       uptimeS: Math.round(process.uptime()),
     };
   });
@@ -368,6 +443,8 @@ app.setErrorHandler((err: FastifyError, _req, reply) => {
       openIncidentByMonitor,
       historyByMonitor: store.recentChecksAll(40),
       uptimeByMonitor: store.uptimeSinceAll([now - DAY, now - 7 * DAY, now - 30 * DAY]),
+      dependentCountByMonitor: store.descendantCountMap(monitors),
+      maintenanceByMonitor: openWindowsByMonitor(now),
     };
 
     return {
@@ -442,6 +519,49 @@ app.setErrorHandler((err: FastifyError, _req, reply) => {
     },
   );
 
+  // ----------------------------------------------------------- maintenance
+
+  app.get('/api/maintenance', async () => store.listMaintenance());
+
+  app.get<{ Params: { id: string } }>('/api/maintenance/:id', async (req, reply) => {
+    const id = parseId(req.params.id);
+    if (id === null) return reply.code(400).send({ error: 'Invalid maintenance id' });
+    const window = store.getMaintenance(id);
+    if (!window) return reply.code(404).send({ error: 'Maintenance window not found' });
+    return window;
+  });
+
+  app.post('/api/maintenance', async (req, reply) => {
+    const input = validateMaintenance(req.body, { partial: false, graph: GRAPH });
+    const window = store.createMaintenance(input);
+    // A window that is already open has to take effect now, not at the next
+    // tick of every monitor it covers.
+    scheduler.sync();
+    return reply.code(201).send(window);
+  });
+
+  app.patch<{ Params: { id: string } }>('/api/maintenance/:id', async (req, reply) => {
+    const id = parseId(req.params.id);
+    if (id === null) return reply.code(400).send({ error: 'Invalid maintenance id' });
+    const existing = store.getMaintenance(id);
+    if (!existing) return reply.code(404).send({ error: 'Maintenance window not found' });
+    // The validator merges the patch onto the stored window and returns a
+    // whole one: the schedule fields are a union, so there is no valid half.
+    const input = validateMaintenance(req.body, { partial: true, current: existing, graph: GRAPH });
+    const window = store.updateMaintenance(id, input);
+    scheduler.sync();
+    return window;
+  });
+
+  app.delete<{ Params: { id: string } }>('/api/maintenance/:id', async (req, reply) => {
+    const id = parseId(req.params.id);
+    if (id === null) return reply.code(400).send({ error: 'Invalid maintenance id' });
+    const removed = store.deleteMaintenance(id);
+    if (!removed) return reply.code(404).send({ error: 'Maintenance window not found' });
+    scheduler.sync();
+    return reply.code(204).send();
+  });
+
   // ------------------------------------------------------------- incidents
 
   app.get<{ Querystring: { limit?: string; monitorId?: string } }>('/api/incidents', async (req, reply) => {
@@ -453,7 +573,7 @@ app.setErrorHandler((err: FastifyError, _req, reply) => {
       monitorId = parsed;
     }
     const incidents = store.listIncidents(limit, monitorId);
-    const names = new Map(store.listMonitors().map((m) => [m.id, m.name]));
+    const names = store.monitorNameMap();
     return incidents.map((i) => ({ ...i, monitorName: names.get(i.monitorId) ?? 'deleted monitor' }));
   });
 
@@ -464,6 +584,10 @@ app.setErrorHandler((err: FastifyError, _req, reply) => {
     const wantId =
       typeof monitorId === 'number' && Number.isSafeInteger(monitorId) && monitorId > 0 ? monitorId : null;
     const monitor = wantId !== null ? store.getMonitor(wantId) : store.listMonitors()[0];
+    // An explicitly requested monitor must exist. Falling through to the
+    // placeholder would send a 200 test alert for a monitor that does not,
+    // leaving the operator to believe they verified the wrong thing.
+    if (wantId !== null && !monitor) return reply.code(404).send({ error: 'Monitor not found' });
     const subject: Monitor = monitor ?? {
       id: 0,
       name: 'uptime-sentinel',

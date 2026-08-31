@@ -90,7 +90,17 @@ export function seedIfEmpty(): number {
     try {
       let parentId: number;
       if (typeof link.parent === 'string') {
-        const resolved = idByName.get(link.parent.trim());
+        const wanted = link.parent.trim();
+        let resolved = idByName.get(wanted);
+        if (resolved === undefined) {
+          // Fall back to a case-insensitive match, the way /api/config/import
+          // resolves names, so the same file behaves the same on both paths.
+          // More than one match stays an error rather than a guess.
+          const lower = wanted.toLowerCase();
+          const matches = [...idByName.entries()].filter(([name]) => name.toLowerCase() === lower);
+          if (matches.length > 1) throw new Error(`more than one seeded monitor is named "${link.parent}"`);
+          if (matches.length === 1) resolved = matches[0]![1];
+        }
         if (resolved === undefined) throw new Error(`no seeded monitor is named "${link.parent}"`);
         if (resolved === null) throw new Error(`more than one seeded monitor is named "${link.parent}"`);
         parentId = resolved;

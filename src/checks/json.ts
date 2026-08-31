@@ -38,12 +38,16 @@ export async function jsonCheck(monitor: Monitor): Promise<CheckResult> {
       return redirectOutcome(statusCode, res.headers.get('location'), accepts, Math.round(performance.now() - started));
     }
 
+    // A status the monitor rejects ends the check here, before the body is
+    // read: the assertion could not change the outcome, so reading up to the
+    // body cap would be pure waste.
+    if (!accepts(statusCode)) {
+      await res.body?.cancel().catch(() => {});
+      return { ok: false, statusCode, latencyMs: Math.round(performance.now() - started), error: `HTTP ${statusCode} ${res.statusText}`.trim() };
+    }
+
     const { body, truncated } = await readBodyCapped(res, BODY_CAP_BYTES);
     const latencyMs = Math.round(performance.now() - started);
-
-    if (!accepts(statusCode)) {
-      return { ok: false, statusCode, latencyMs, error: `HTTP ${statusCode} ${res.statusText}`.trim() };
-    }
 
     if (truncated) {
       // A prefix of valid JSON is not valid JSON. Say what actually happened

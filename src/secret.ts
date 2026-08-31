@@ -17,6 +17,44 @@ export function secretEquals(a: string, b: string): boolean {
 }
 
 /**
+ * The SHA-256 of `config.authPassword`, computed once and reused.
+ *
+ * `secretEquals` rehashes both arguments on every call. The configured
+ * password is the same for the lifetime of the process, so hashing it
+ * every request just to re-derive a value the server already knows
+ * burns CPU on the very path the dashboard polls every 10s. Hashing the
+ * request input is unavoidable; hashing the stored password is not.
+ *
+ * An empty password (auth disabled) returns null, so the caller can
+ * short-circuit without a hash comparison at all.
+ */
+let cachedPasswordHash: Buffer | null = null;
+let cachedPasswordFor: string | null = null;
+
+export function passwordHash(): Buffer | null {
+  const pw = config.authPassword;
+  if (pw === '') return null;
+  if (cachedPasswordFor !== pw) {
+    cachedPasswordHash = createHash('sha256').update(pw, 'utf8').digest();
+    cachedPasswordFor = pw;
+  }
+  return cachedPasswordHash;
+}
+
+/**
+ * Constant-time check that `input` matches `config.authPassword`.
+ *
+ * Hashed input is compared against the cached hash of the configured
+ * password, so this is one SHA-256 per request rather than two.
+ */
+export function passwordMatches(input: string): boolean {
+  const expected = passwordHash();
+  if (expected === null) return false;
+  const actual = createHash('sha256').update(input, 'utf8').digest();
+  return timingSafeEqual(actual, expected);
+}
+
+/**
  * A stable, high-entropy key for signing session cookies.
  *
  * Deriving this from AUTH_PASSWORD would tie forgery resistance to how good
