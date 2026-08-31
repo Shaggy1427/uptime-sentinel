@@ -24,7 +24,7 @@ const DAY = 86_400_000;
 /** Dependency-graph access handed to the validator; see ValidateOptions.graph. */
 const GRAPH: NonNullable<ValidateOptions['graph']> = store.graph;
 const AUTH_COOKIE = 'sentinel_auth';
-const OPEN_ROUTES = new Set(['/api/health', '/api/login', '/api/auth']);
+const OPEN_ROUTES = new Set(['/api/health', '/api/login']);
 
 /**
  * Monitor `headers` can hold credentials for the endpoint being monitored
@@ -268,8 +268,6 @@ export async function buildServer() {
   });
 
   // ------------------------------------------------------------------ auth
-
-  app.get('/api/auth', async () => ({ required: authEnabled }));
 
   app.post(
     '/api/login',
