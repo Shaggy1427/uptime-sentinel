@@ -161,10 +161,20 @@ function describe(monitor: Monitor, ctx: StatusContext) {
   // monitor's next tick -- which on a 5-minute interval is a long time to sit
   // watching a card that still says "down".
   const maintenance = monitor.paused ? null : (ctx.maintenanceByMonitor.get(monitor.id) ?? null);
+  const liveStatus = state?.status ?? 'pending';
 
   return {
     ...redact(monitor),
-    status: monitor.paused ? 'paused' : maintenance ? 'maintenance' : (state?.status ?? 'pending'),
+    // Dependency suppression is evaluated before maintenance by the
+    // scheduler: while an ancestor is down the result is unknowable, whether
+    // or not this monitor also has a window open. Keep that priority here.
+    status: monitor.paused
+      ? 'paused'
+      : liveStatus === 'suppressed'
+        ? 'suppressed'
+        : maintenance
+          ? 'maintenance'
+          : liveStatus,
     maintenance,
     parentName: parent?.name ?? null,
     // Named so the dashboard can say what a monitor is waiting on rather than
