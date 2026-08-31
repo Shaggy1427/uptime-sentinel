@@ -1457,6 +1457,8 @@ warning at startup when no password is set.
 **When auth is on:**
 
 - The login endpoint is rate limited to 10 attempts per 5 minutes per client.
+  The active failure window is stored in SQLite, so restarting the process does
+  not reset the attempt budget; expired source-address rows are pruned.
 - Passwords are compared in constant time. Both sides are hashed to 32 bytes
   first, so the comparison cannot leak the expected length.
 - Session cookies are signed with a random 32-byte key stored at

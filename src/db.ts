@@ -164,6 +164,18 @@ const MIGRATIONS: string[] = [
   CREATE INDEX idx_checks_monitor_time
     ON checks(monitor_id, checked_at DESC, ok, latency_ms, maintenance_id);
   `,
+  // 7: durable login throttling. The Fastify rate-limit store is in-process,
+  // so its counters disappear on restart; this table preserves the active
+  // failure window. last_failed_at is indexed for bounded stale-row cleanup.
+  `
+  CREATE TABLE login_failures (
+    ip             TEXT    PRIMARY KEY,
+    failed_count   INTEGER NOT NULL,
+    locked_until   INTEGER,
+    last_failed_at INTEGER NOT NULL
+  );
+  CREATE INDEX idx_login_failures_last_failed ON login_failures(last_failed_at);
+  `,
 ];
 
 function migrate(): void {
@@ -917,3 +929,59 @@ export const graph = {
   exists: (id: number) => getMonitor(id) !== null,
   wouldCreateCycle: (selfId: number, parentId: number) => wouldCreateCycle(selfId, parentId),
 };
+
+// ----------------------------------------------------------- login lockout
+//
+// Persists the /api/login brute-force counter so it survives a process
+// restart. The in-process @fastify/rate-limit cap (10 per 5 min) is the
+// fast-path; this table is the durable backstop an attacker cannot reset
+// by waiting for a deploy.
+
+/** How many failures inside one window trigger a lockout. */
+export const LOGIN_LOCKOUT_THRESHOLD = 10;
+/** How long the lockout lasts once the threshold is tripped. */
+export const LOGIN_LOCKOUT_WINDOW_MS = 5 * 60_000;
+
+export interface LoginFailureRow {
+  failed_count: number;
+  locked_until: number | null;
+  last_failed_at: number;
+}
+
+export function getLoginFailure(ip: string): LoginFailureRow | null {
+  const r = prepared('SELECT failed_count, locked_until, last_failed_at FROM login_failures WHERE ip = ?').get(ip) as
+    | LoginFailureRow
+    | undefined;
+  return r ?? null;
+}
+
+export function loginLockoutRemainingMs(ip: string, now = Date.now()): number {
+  const lockedUntil = getLoginFailure(ip)?.locked_until;
+  return lockedUntil == null ? 0 : Math.max(0, lockedUntil - now);
+}
+
+/** Increment the failure count and lock the IP out once the threshold trips. */
+export function recordLoginFailure(ip: string, now = Date.now()): LoginFailureRow {
+  // A rotating source address must not grow this unauthenticated table forever.
+  // The index added with the table keeps this cleanup proportional to expired
+  // rows, and login failures are already capped to a very low request rate.
+  prepared('DELETE FROM login_failures WHERE last_failed_at <= ?').run(now - LOGIN_LOCKOUT_WINDOW_MS);
+
+  const existing = getLoginFailure(ip);
+  const count = (existing?.failed_count ?? 0) + 1;
+  const lockedUntil = count >= LOGIN_LOCKOUT_THRESHOLD ? now + LOGIN_LOCKOUT_WINDOW_MS : null;
+  prepared(
+    `INSERT INTO login_failures (ip, failed_count, locked_until, last_failed_at)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(ip) DO UPDATE SET
+       failed_count = excluded.failed_count,
+       locked_until = excluded.locked_until,
+       last_failed_at = excluded.last_failed_at`,
+  ).run(ip, count, lockedUntil, now);
+  return { failed_count: count, locked_until: lockedUntil, last_failed_at: now };
+}
+
+/** Called on a successful login; clears the IP's failure counter entirely. */
+export function clearLoginFailure(ip: string): void {
+  prepared('DELETE FROM login_failures WHERE ip = ?').run(ip);
+}

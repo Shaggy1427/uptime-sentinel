@@ -303,14 +303,41 @@ export async function buildServer() {
     {
       // Without this the password is guessable at a few thousand tries a
       // second against a permanently-open endpoint.
-      config: { rateLimit: { max: 10, timeWindow: '5 minutes' } },
+      config: {
+        rateLimit: {
+          max: store.LOGIN_LOCKOUT_THRESHOLD,
+          timeWindow: store.LOGIN_LOCKOUT_WINDOW_MS,
+        },
+      },
     },
     async (req, reply) => {
       if (!authEnabled) return { ok: true };
+      const ip = req.ip;
+
+      // Persistent lockout check: rejects the request before even comparing
+      // the password. The in-process rate limit is the fast-path backstop;
+      // this row is what an attacker cannot reset by waiting for a restart.
+      const remainingMs = store.loginLockoutRemainingMs(ip);
+      if (remainingMs > 0) {
+        return reply
+          .header('retry-after', String(Math.ceil(remainingMs / 1000)))
+          .code(429)
+          .send({ error: 'Too many requests. Try again later.' });
+      }
+
       const { password } = (req.body ?? {}) as { password?: string };
       if (typeof password !== 'string' || !passwordMatches(password)) {
+        const row = store.recordLoginFailure(ip);
+        if (row.locked_until !== null) {
+          return reply
+            .header('retry-after', String(Math.ceil((row.locked_until - Date.now()) / 1000)))
+            .code(429)
+            .send({ error: 'Too many requests. Try again later.' });
+        }
         return reply.code(401).send({ error: 'Wrong password' });
       }
+      store.clearLoginFailure(ip);
+
       reply.setCookie(AUTH_COOKIE, 'ok', {
         path: '/',
         httpOnly: true,

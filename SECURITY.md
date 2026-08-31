@@ -196,6 +196,10 @@ repetition is itself the attack.
 | `POST /api/monitors/:id/check` | 30 requests | 1 minute | Each call makes this server emit a request to a third party. Uncapped, it is a traffic amplifier |
 | `POST /api/config/import` | 30 requests | 1 minute | A burst of database writes per call |
 
+The login failure window is also stored in SQLite. Restarting or redeploying the
+process therefore does not restore an attacker's attempt budget. Counters reset
+after the five-minute window, and expired source-address rows are pruned.
+
 Limits are keyed on the client IP. A throttled request gets `429` with a message
 naming how long to wait, rather than a `500` — the limiter is wired to produce a
 real Fastify error carrying `statusCode`, so the error handler renders it
