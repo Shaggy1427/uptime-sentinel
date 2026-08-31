@@ -386,16 +386,18 @@ function renderSummary(monitors, notificationsConfigured) {
   document.title = count('down') > 0 ? `(${count('down')} down) Uptime Sentinel` : 'Uptime Sentinel';
 }
 
-/**
- * A fingerprint of everything the table renders. Incident rows are immutable
- * once created except for the fields an open incident bumps (resolution,
- * alert/reminder stamps, failure count, cause), so an unchanged key means the
- * table would come out byte-for-byte identical.
- */
+/** A collision-safe fingerprint of the values rendered by the table. */
 function incidentsKey(incidents) {
-  return incidents
-    .map((i) => `${i.id}|${i.resolvedAt ?? ''}|${i.alertedAt ?? ''}|${i.lastReminderAt ?? ''}|${i.checksFailed ?? 0}|${i.cause ?? ''}`)
-    .join(';');
+  return JSON.stringify(
+    incidents.map((i) => [
+      i.id,
+      i.monitorName,
+      i.startedAt,
+      i.resolvedAt ?? null,
+      Boolean(i.alertedAt),
+      i.cause ?? null,
+    ]),
+  );
 }
 
 let lastIncidentsKey = null;
