@@ -21,8 +21,13 @@ function method(key: string, fallback: string): string {
 function int(key: string, fallback: number, min?: number, max?: number): number {
   const v = process.env[key];
   if (v === undefined || v === '') return fallback;
-  const n = Number.parseInt(v, 10);
-  if (Number.isNaN(n)) throw new Error(`Env ${key} must be an integer, got "${v}"`);
+  // A canonical integer, not Number.parseInt: it would silently accept
+  // "30abc" as 30 and " 8" as 8 -- the exact misparse the API-side validator
+  // refuses for monitor fields. A typo in an env file should fail loudly at
+  // startup, not shrink a timeout or a port by an invisible amount.
+  if (!/^\s*-?\d+\s*$/.test(v)) throw new Error(`Env ${key} must be an integer, got "${v}"`);
+  const n = Number(v.trim());
+  if (!Number.isSafeInteger(n)) throw new Error(`Env ${key} must be an integer, got "${v}"`);
   if (min !== undefined && n < min) throw new Error(`Env ${key} must be at least ${min}, got ${n}`);
   if (max !== undefined && n > max) throw new Error(`Env ${key} must be at most ${max}, got ${n}`);
   return n;
@@ -50,6 +55,14 @@ function publicUrl(key: string): string {
   }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     throw new Error(`Env ${key} must be an http(s) URL, got "${v}"`);
+  }
+  // Header values must be ByteString (latin-1). This URL becomes the ntfy
+  // "Click" header, and undici rejects any header value with a character
+  // above 255 -- so a unicode hostname or path here would make every
+  // notification throw and silently kill all alerting. Fail at startup,
+  // where the mistake is obvious, instead of on every alert, where it is not.
+  if (!/^[\x21-\x7E]*$/.test(v)) {
+    throw new Error(`Env ${key} must contain only printable ASCII characters, got "${v}"`);
   }
   return v.replace(/\/+$/, '');
 }
