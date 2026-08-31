@@ -30,6 +30,13 @@ test('GET /api/health reports readiness', async () => {
   const res = await app.inject({ method: 'GET', url: '/api/health' });
   assert.equal(res.statusCode, 200);
   assert.equal(res.json().ok, true);
+  // Auth is off in this suite, so the full body -- version pin and monitor
+  // counts included -- is returned, matching the public-instance trade-off.
+  // (When AUTH_PASSWORD is set these are withheld; see security.test.ts.)
+  assert.deepEqual(
+    Object.keys(res.json()).sort(),
+    ['down', 'monitors', 'ok', 'suppressed', 'uptimeS', 'version'],
+  );
 });
 
 test('monitor CRUD round-trips through the API', async () => {

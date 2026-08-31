@@ -122,7 +122,7 @@ are deliberately exempt and are listed in `OPEN_ROUTES` in `src/server.ts`:
 
 | Open route | Why | What it discloses |
 |------------|-----|-------------------|
-| `GET /api/health` | So an external dead-man's-switch can poll liveness | `ok`, the version string, counts of monitors / down / suppressed, and process uptime. Never targets or configuration |
+| `GET /api/health` | So an external dead-man's-switch can poll liveness | With `AUTH_PASSWORD` set: `ok` and process uptime only. Without it: also the version string and counts of monitors / down / suppressed. Never targets or configuration |
 | `POST /api/login` | It is the way in | Nothing beyond whether a password was correct |
 
 **Two ways to authenticate:**
@@ -386,8 +386,9 @@ GitHub Actions workflows — the latter because a PR title interpolated into a
 - Missing hardening on an instance deliberately run without a password, per
   [the security model](#the-security-model).
 - `GET /api/health` being reachable unauthenticated. This is deliberate so an
-  external dead-man's-switch can poll it, and it returns only counts, a version
-  string, and process uptime — never targets or configuration.
+  external dead-man's-switch can poll it. With `AUTH_PASSWORD` set it returns
+  only `ok` and process uptime; without it, also a version string and
+  down/suppressed counts — never targets or configuration.
 - Rate-limit evasion on an instance running with `TRUST_PROXY=true` and no
   reverse proxy in front of it. That is the documented failure mode of a
   setting you have to opt into.
