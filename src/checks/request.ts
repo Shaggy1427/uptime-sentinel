@@ -76,7 +76,13 @@ export async function readBodyCapped(res: Response, cap: number): Promise<Capped
   const reader = res.body?.getReader();
   if (!reader) return { body: '', truncated: false };
 
-  const chunks: Uint8Array[] = [];
+  // Decoded incrementally as chunks arrive, rather than buffering the bytes,
+  // concatenating them into one buffer and decoding once: that intermediate
+  // concat is a second cap-sized allocation plus a full copy on every keyword
+  // or JSON check. stream:true carries multibyte sequences across chunk
+  // boundaries, and the final flush emits whatever was left buffered.
+  const decoder = new TextDecoder();
+  let body = '';
   let size = 0;
   let done = false;
   try {
@@ -87,7 +93,7 @@ export async function readBodyCapped(res: Response, cap: number): Promise<Capped
         break;
       }
       if (!value) continue;
-      chunks.push(value);
+      body += decoder.decode(value, { stream: true });
       size += value.byteLength;
     }
   } finally {
@@ -99,13 +105,7 @@ export async function readBodyCapped(res: Response, cap: number): Promise<Capped
     await res.body?.cancel().catch(() => {});
   }
 
-  const all = new Uint8Array(size);
-  let offset = 0;
-  for (const chunk of chunks) {
-    all.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return { body: new TextDecoder().decode(all), truncated: !done };
+  return { body: body + decoder.decode(), truncated: !done };
 }
 
 export function describeFetchError(err: unknown, timeoutMs: number): string {
