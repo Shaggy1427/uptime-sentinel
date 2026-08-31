@@ -82,5 +82,11 @@ export const ntfyChannel: Channel = {
       const detail = await res.text().catch(() => '');
       throw new Error(`ntfy responded ${res.status}: ${detail.slice(0, 200)}`);
     }
+
+    // A successful response body is not otherwise useful, but it still has to
+    // be consumed or cancelled. Leaving it open keeps the underlying undici
+    // connection occupied until garbage collection, so every alert can strand
+    // another socket instead of returning it to the pool promptly.
+    await res.body?.cancel().catch(() => {});
   },
 };
