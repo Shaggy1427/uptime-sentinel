@@ -1,8 +1,19 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { createMonitor, getMonitor, listMonitors, updateMonitor, wouldCreateCycle } from './db.ts';
+import {
+  appliedMigrations,
+  CHANNELS_MIGRATION,
+  createChannel,
+  createMonitor,
+  getMonitor,
+  listChannels,
+  listMonitors,
+  updateMonitor,
+  wouldCreateCycle,
+} from './db.ts';
+import { config } from './config.ts';
 import { validateMonitor, type ValidateOptions } from './validate.ts';
-import type { MonitorInput } from './types.ts';
+import type { ChannelConfig, MonitorInput } from './types.ts';
 
 /** Dependency-graph access for the validator, same shape server.ts hands it. */
 const GRAPH: NonNullable<ValidateOptions['graph']> = {
@@ -122,4 +133,41 @@ export function seedIfEmpty(): number {
 
   console.log(`[seed] imported ${created} monitor(s) from ${file}`);
   return created;
+}
+
+/**
+ * Move an install's NTFY_* settings into the channels table, once.
+ *
+ * Notification settings used to be environment variables read at load. They
+ * are now rows, so an install that upgrades without this step has a channels
+ * table with nothing in it -- and every monitor silently stops alerting. That
+ * is the worst failure this feature could have, because the symptom is
+ * silence, which is also what a healthy system looks like.
+ *
+ * Gated on having *just applied* the migration that created the table, not on
+ * the table being empty. Empty is also the state of someone who deliberately
+ * deleted every channel, and re-creating one for them on every restart would
+ * be its own bug.
+ *
+ * The seeded channel is marked default, so monitors that name no channel --
+ * which is all of them immediately after an upgrade -- keep reaching it.
+ */
+export function seedChannelFromEnv(): boolean {
+  if (!appliedMigrations.includes(CHANNELS_MIGRATION)) return false;
+  if (config.ntfy.topic === '') return false;
+  // Belt and braces: the migration cannot have run with rows already present,
+  // but a caller invoking this twice should not produce two channels.
+  if (listChannels().length > 0) return false;
+
+  const channelConfig: ChannelConfig = {
+    url: config.ntfy.url,
+    topic: config.ntfy.topic,
+    downPriority: config.ntfy.downPriority,
+    upPriority: config.ntfy.upPriority,
+  };
+  if (config.ntfy.token) channelConfig.token = config.ntfy.token;
+
+  createChannel({ name: 'ntfy', type: 'ntfy', config: channelConfig, enabled: true, isDefault: true });
+  console.log('[seed] moved NTFY_* settings into a default channel named "ntfy"');
+  return true;
 }

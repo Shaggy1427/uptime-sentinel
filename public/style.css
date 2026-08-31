@@ -306,6 +306,14 @@ menu { display: flex; justify-content: flex-end; gap: .5rem; padding: 0; margin:
 .weekdays { display: flex; flex-wrap: wrap; gap: .1rem .7rem; }
 .weekdays .check { font-size: .8rem; }
 
+/* A monitor whose alerts would reach nobody. Warning-coloured rather than
+   error-coloured: the monitor is fine, its routing is not. */
+.m-unrouted {
+  font-size: .8rem; color: var(--pending);
+  background: color-mix(in srgb, var(--pending) 10%, transparent);
+  border-radius: 6px; padding: .35rem .5rem;
+}
+
 /* ---- responsive ----
  *
  * There were no breakpoints at all before this: the only media query in the

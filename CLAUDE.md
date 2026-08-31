@@ -191,9 +191,16 @@ user_version`, each in its own transaction with a rollback on failure.
 
 **Append a new SQL string. Never edit an existing one.** Databases in the wild
 have already recorded their `user_version`; editing entry *n* means every
-existing install skips your change forever. There are four migrations today:
-the initial schema, JSON assertion columns, dependency columns, and a widened
-`checks` index.
+existing install skips your change forever. There are seven migrations today:
+the initial schema, JSON assertion columns, dependency columns, a widened
+`checks` index, maintenance windows, the `maintenance_id` tag on `checks`, and
+notification channels with their monitor routing.
+
+`migrate()` returns the migration numbers it actually applied, exported as
+`appliedMigrations`. That is how a one-time upgrade step runs exactly once --
+`seedChannelFromEnv()` uses it to move an install's `NTFY_*` settings into the
+channels table on the upgrade that creates it. Gating such a step on "the table
+is empty" instead would re-run it for anyone who deliberately emptied it.
 
 ### Module layout and the import graph
 
@@ -224,9 +231,13 @@ src/
     jsonpath.ts  the small path reader
     assert.ts    the ten comparison operators
   notify/
-    index.ts     the channel registry and dispatch fan-out
-    types.ts     Channel and NotificationEvent
-    ntfy.ts      the ntfy channel
+    index.ts     dispatch fan-out, and why nothing was sent
+    types.ts     ChannelTypeDef and NotificationEvent
+    schema.ts    per-type config fields; imports nothing, so validate.ts can read it
+    registry.ts  the type registry
+    message.ts   the title and body every type shares
+    ntfy.ts      the ntfy channel type
+    discord.ts   the Discord channel type
 public/          the dashboard: index.html, app.js, style.css. No build step
 packaging/       systemd unit template with __PLACEHOLDERS__ filled at install time
 scripts/         install.sh and uninstall.sh for the non-Docker path
@@ -365,15 +376,33 @@ the bulk path.
 5. Add a test file, and document the type in the README's
    [Monitor types](README.md#monitor-types) table.
 
-### Adding a notification channel
+### Adding a notification channel type
 
-1. Create `src/notify/yourchannel.ts` exporting a `Channel`.
-2. `enabled()` returns false when it is not configured, so it is skipped
-   silently rather than erroring.
-3. `send()` throws on failure; the dispatcher logs it and carries on.
-4. Add it to the `channels` array in `src/notify/index.ts`.
-5. Add its variables to `src/config.ts`, `.env.example`, and the README's
-   [Environment variables](README.md#environment-variables) tables.
+Channels are rows, not environment variables. A *type* says how to talk to a
+kind of destination; an *instance* is a configured row of that type, which is
+why two ntfy topics can coexist. Adding a type needs no migration and no
+configuration:
+
+1. Create `src/notify/yourtype.ts` exporting a `ChannelTypeDef`. `send(config,
+   event)` takes its settings per call from the stored row -- never from
+   `config.ts`.
+2. `send()` throws on failure; `dispatch()` catches it and carries on. A
+   channel must never throw into the scheduler.
+3. Add it to `TYPES` in `src/notify/registry.ts`.
+4. Declare its fields in `CHANNEL_SCHEMA` in `src/notify/schema.ts`, marking
+   every credential `secret: true`. Validation, redaction, the export filter
+   and the dashboard editor all read that one declaration, so a field marked
+   secret is withheld everywhere without another change.
+5. Build the message with `title()` and `body()` from `src/notify/message.ts`
+   rather than writing your own, or two destinations will start telling
+   different stories about the same outage.
+6. Add it to the `<select>` in the channels dialog in `public/index.html` and
+   to `CHANNEL_FIELDS` in `public/app.js`, and document it in the README's
+   [Notification channels](README.md#notification-channels) table.
+
+`src/notify/schema.ts` deliberately imports nothing but a type: `validate.ts`
+reads it, and `config.ts` imports `validate.ts`, so anything it pulled in would
+close the same cycle importing `db.ts` into the validator would.
 
 ### Adding configuration
 

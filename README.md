@@ -33,6 +33,7 @@ state, uptime and incident history. No config files are required after setup.
 - [Monitor types](#monitor-types)
 - [Monitor fields](#monitor-fields)
 - [Dependencies](#dependencies)
+- [Notification channels](#notification-channels)
 - [Maintenance windows](#maintenance-windows)
 - [The alert state machine](#the-alert-state-machine)
 - [Environment variables](#environment-variables)
@@ -748,6 +749,85 @@ Dependencies nest to any depth. The rules:
 
 ---
 
+## Notification channels
+
+A channel is a place alerts go. They are records, not environment variables,
+which is what makes **two of the same kind** possible — a loud ntfy topic your
+phone wakes for and a quiet one it does not, both configured and managed
+separately.
+
+| Type | What it needs |
+|------|---------------|
+| `ntfy` | Server (default `https://ntfy.sh`), topic, optional access token, per-kind priorities |
+| `discord` | Webhook URL, optional display name |
+
+Manage them under **Channels** in the dashboard, or through
+[`/api/channels`](#endpoints).
+
+### Which channels a monitor uses
+
+Each monitor either names the channels it wants, or names none and uses
+whichever channels are marked **default**.
+
+```
+Critical DB   →  loud            (named explicitly)
+Routine job   →  quiet           (named nothing; quiet is the default)
+```
+
+That fallback is the whole reason nothing broke when this arrived: every
+monitor that existed before channels did names nothing, so they all keep
+reaching the default.
+
+Three rules are worth knowing, because each one is a decision rather than an
+accident:
+
+- **Naming a channel replaces the defaults, it does not add to them.** Picking
+  "loud" means loud *instead of* the default, not as well as.
+- **Switching a channel off silences what it carried.** Its monitors do not
+  fall back to the defaults — rerouting alerts to somewhere you did not choose
+  would be a surprise, not a kindness.
+- **Deleting a channel returns its monitors to the defaults**, because they
+  now name nothing.
+
+A monitor that reaches no channel is called out on its card and in the log,
+rather than just going quiet:
+
+```
+[notify] "Critical DB" is routed to no enabled channel - down alert dropped
+```
+
+That distinction matters. "Nothing is configured" is a choice; "this monitor
+reaches nothing" is a mistake, and the two used to look identical.
+
+### Credentials are write-only
+
+An ntfy topic, ntfy token, and Discord webhook URL are credentials. On a public
+ntfy server, anyone who learns a topic can subscribe and read host and outage
+details; anyone holding a Discord webhook can post to it. They follow the same
+rule as monitor request headers: the API returns them as `<redacted>`, and
+sending that placeholder back means "leave it as it is".
+
+`GET /api/config/export` withholds them too, unless you ask with
+`?includeSecrets=true`. An export that withheld a credential records which key
+it held back, and re-importing that file keeps the stored credential rather
+than blanking it.
+
+### Upgrading from the `NTFY_*` variables
+
+Alerting used to be configured entirely by `NTFY_TOPIC` and friends. On the
+first start after upgrading, those values are copied into a channel named
+`ntfy`, marked default, and everything routes to it exactly as before — no
+action required.
+
+After that the environment variables are inert: **edit the channel, not
+`.env`**. They are read once more only if you start a database that has never
+had the channels table, so a fresh install still comes up able to alert.
+
+They are not re-applied if you delete every channel. Deleting them all means
+you want silence, and re-creating one on the next restart would be its own bug.
+
+---
+
 ## Maintenance windows
 
 Planned downtime is not an outage, and it should not read like one. A
@@ -967,12 +1047,12 @@ clamped value, so a typo is visible immediately rather than three weeks later.
 | `RETENTION_DAYS` | integer | `30` | ≥ 0 | Individual check rows older than this are pruned every 6 hours. `0` disables pruning. Incidents are kept forever |
 | `MONITORS_FILE` | path | *(unset)* | — | Seed file for an empty database. When set but missing, that is reported and nothing is seeded. Falls back to `./monitors.json` when unset |
 
-### ntfy
+### Legacy ntfy bootstrap
 
 | Variable | Type | Default | Bounds | Notes |
 |----------|------|---------|--------|-------|
 | `NTFY_URL` | URL | `https://ntfy.sh` | — | Trailing slashes stripped. Point at your own instance if you self-host |
-| `NTFY_TOPIC` | string | *(empty)* | — | **Required for any notification to be sent.** With it empty the channel reports itself as not configured, every alert is logged and dropped, and the dashboard warns you |
+| `NTFY_TOPIC` | string | *(empty)* | — | Copied into a default channel when the channels migration first runs. Required for a fresh install to start with ntfy configured; inert afterwards |
 | `NTFY_TOKEN` | string | *(empty)* | — | Sent as `Authorization: Bearer …`, for protected topics on a self-hosted ntfy or ntfy.sh Pro |
 | `NTFY_DOWN_PRIORITY` | integer | `5` | 1–5 | Priority for DOWN and STILL DOWN. 5 is urgent and bypasses most phone quiet-hours settings |
 | `NTFY_UP_PRIORITY` | integer | `3` | 1–5 | Priority for RECOVERED and test pushes |
@@ -1036,13 +1116,20 @@ curl -H 'Authorization: Bearer your-dashboard-password' \
 | `DELETE` | `/api/monitors/:id` | required | global | `204`. Cascades to its checks and incidents; children are orphaned, not deleted |
 | `POST` | `/api/monitors/:id/check` | required | **30 per minute** | Run a check right now and return its `CheckResult` |
 | `GET` | `/api/monitors/:id/checks` | required | global | Raw check rows, oldest-first. `?limit=` default 200, max 1000 |
+| `GET` | `/api/channels` | required | global | Every notification channel, credentials redacted |
+| `POST` | `/api/channels` | required | global | Create one. `201` with the created channel |
+| `GET` | `/api/channels/:id` | required | global | One channel, credentials redacted |
+| `PATCH` | `/api/channels/:id` | required | global | Merge onto the stored channel; a redacted secret sent back is kept |
+| `DELETE` | `/api/channels/:id` | required | global | `204`. Its monitors fall back to the defaults |
+| `GET` | `/api/monitors/:id/channels` | required | global | `{ "channelIds": [...] }`. Empty means "use the defaults" |
+| `PUT` | `/api/monitors/:id/channels` | required | global | Replace a monitor's routing. An unknown id is a 400, not a silent drop |
 | `GET` | `/api/maintenance` | required | global | Every maintenance window, with the monitor ids it covers |
 | `POST` | `/api/maintenance` | required | global | Create one. `201` with the created window |
 | `GET` | `/api/maintenance/:id` | required | global | One window |
 | `PATCH` | `/api/maintenance/:id` | required | global | Merge onto the stored window; a strategy change needs that strategy's fields |
 | `DELETE` | `/api/maintenance/:id` | required | global | `204`. The checks it covered keep their history and start counting again |
 | `GET` | `/api/incidents` | required | global | Incident history with `monitorName` attached. `?limit=` default 50, max 500; `?monitorId=` filters |
-| `POST` | `/api/test-notification` | required | global | Send a test push. Optional body `{ "monitorId": n }` |
+| `POST` | `/api/test-notification` | required | global | Send a test push. Optional body `{ "monitorId": n }` to use that monitor's routing, or `{ "channelId": n }` to test one channel — which works even while it is switched off |
 | `GET` | `/api/config/export` | required | global | Every monitor as a portable JSON file. `?includeSecrets=true` includes header values |
 | `POST` | `/api/config/import` | required | **30 per minute** | Merge a config file in. `?dryRun=true` previews without writing |
 | `GET` | `/metrics` | required | global | Prometheus text exposition, `version=0.0.4` |
@@ -1116,8 +1203,10 @@ row (with header values redacted) plus live state:
 | `history` | Up to 40 recent checks as `{ ok, latencyMs, checkedAt }`, oldest first |
 | `uptime` | `{ day, week, month }`, each `{ total, up, ratio, avgLatencyMs }` |
 
-The envelope carries `generatedAt` and `notificationsConfigured`, the latter
-being false when `NTFY_TOPIC` is empty.
+The envelope carries `generatedAt`, `notificationsConfigured`, and
+`authRequired`. `notificationsConfigured` is false when no channel is enabled;
+each monitor also carries the names of the enabled channels it currently
+reaches.
 
 This route costs a fixed handful of queries regardless of how many monitors
 exist, rather than roughly six per monitor, because the dashboard polls it
@@ -1125,11 +1214,11 @@ every 10 seconds on a Raspberry Pi.
 
 ### `POST /api/test-notification`
 
-Sends a test push through every configured channel. With a `monitorId` it uses
-that monitor; without one it uses the first monitor; with no monitors at all it
-synthesises a placeholder so a brand-new install can still verify its topic.
-Returns `400` with `No notification channel is configured. Set NTFY_TOPIC.`
-when nothing is configured.
+Sends a test push through the selected monitor's route. With a `monitorId` it
+uses that monitor; with a `channelId` it tests that channel directly, even when
+the channel is switched off. Without a monitor it uses the first one, or a
+placeholder on an empty install. Returns `400` when no channel is configured or
+the selected monitor reaches no enabled channel.
 
 ### Worked examples
 
@@ -1605,16 +1694,16 @@ around this entirely.
 <details>
 <summary>No notifications arrive</summary>
 
-- Press **Test alert** on the dashboard. A `400` saying no channel is configured
-  means `NTFY_TOPIC` is empty.
-- Check the logs for `[notify] ntfy failed:` lines, which carry ntfy's own
-  status code and response.
-- Confirm the phone app is subscribed to exactly the topic you configured;
-  topic names are case-sensitive.
+- Open **Channels** and test the intended destination directly. A `400` saying
+  no channel is configured means one must be added or enabled.
+- Check the logs for `[notify]` failure lines, which include the channel name,
+  type, status code, and a bounded response detail.
+- For ntfy, confirm the phone app is subscribed to exactly the configured
+  topic; topic names are case-sensitive.
 - Remember that nothing fires until an outage has lasted `alertAfterS`. A
   monitor that flaps for 30 seconds with `alertAfterS: 120` is doing exactly
   what it was told to do.
-- For a protected topic, `NTFY_TOKEN` must be set.
+- For a protected ntfy topic, configure its access token on the channel.
 
 </details>
 

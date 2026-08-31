@@ -33,8 +33,9 @@
     <nav class="actions" aria-label="Dashboard actions">
       <button id="btn-export" class="ghost" title="Download every monitor as a JSON file">Export</button>
       <button id="btn-import" class="ghost" title="Add or update monitors from a JSON file">Import</button>
-      <button id="btn-test" class="ghost" title="Send a test notification to ntfy">Test alert</button>
+      <button id="btn-test" class="ghost" title="Send a test notification">Test alert</button>
       <button id="btn-maintenance" class="ghost" title="Schedule expected downtime">Maintenance</button>
+      <button id="btn-channels" class="ghost" title="Where alerts are sent">Channels</button>
       <button id="btn-add" class="primary">Add monitor</button>
       <!-- POST /api/logout has existed all along with nothing to call it.
            Hidden until we know a password is actually set. -->
@@ -80,6 +81,11 @@
         <label>Check every (s)<input name="intervalS" type="number" min="5" max="86400" value="60" /></label>
         <label>Timeout (ms)<input name="timeoutMs" type="number" min="500" max="120000" value="10000" /></label>
         <label>Retries before down<input name="retries" type="number" min="1" max="20" value="2" /></label>
+
+        <label class="wide">Send alerts to
+          <select name="channelIds" multiple size="4"></select>
+          <small id="channels-hint">Select none to use the default channels.</small>
+        </label>
 
         <label class="wide">Depends on
           <select name="parentId"><option value="">Nothing — check independently</option></select>
@@ -143,6 +149,42 @@
       <menu>
         <button type="button" id="editor-cancel" class="ghost">Cancel</button>
         <button type="submit" class="primary">Save</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="channels">
+    <form id="channels-form" method="dialog">
+      <h2>Notification channels</h2>
+      <p class="hint">
+        Where alerts are sent. A monitor that selects none of these uses whichever are marked
+        <b>default</b>, so you only have to pick per monitor when you want something different.
+      </p>
+
+      <div id="channels-list" class="report"></div>
+
+      <fieldset class="wide">
+        <legend id="channel-form-title">Add a channel</legend>
+        <div class="fields">
+          <label class="wide">Name<input name="name" required maxlength="120" placeholder="Loud phone alerts" /></label>
+
+          <label>Type
+            <select name="type">
+              <option value="ntfy">ntfy</option>
+              <option value="discord">Discord</option>
+            </select>
+          </label>
+
+          <label class="check"><input type="checkbox" name="isDefault" checked /> Use for monitors that pick none</label>
+
+          <div id="channel-fields" class="fields wide"></div>
+        </div>
+      </fieldset>
+
+      <p id="channels-error" class="error hidden"></p>
+      <menu>
+        <button type="button" id="channels-cancel" class="ghost">Close</button>
+        <button type="submit" id="channels-save" class="primary">Add channel</button>
       </menu>
     </form>
   </dialog>

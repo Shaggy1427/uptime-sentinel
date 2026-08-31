@@ -83,7 +83,9 @@ test('invalid monitors are rejected with a useful message', async () => {
 test('test-notification fails loudly when no channel is configured', async () => {
   const res = await app.inject({ method: 'POST', url: '/api/test-notification', payload: {} });
   assert.equal(res.statusCode, 400);
-  assert.match(res.json().error, /NTFY_TOPIC/);
+  // No longer "set NTFY_TOPIC": channels are rows, so that advice would send
+  // the operator to the wrong file entirely.
+  assert.match(res.json().error, /No notification channel is configured/);
 });
 
 test('test-notification refuses an unknown monitorId instead of testing a placeholder', async () => {

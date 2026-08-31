@@ -197,6 +197,7 @@ function monitorCard(monitor) {
 
   const target = el('div', 'm-target');
   const maintenance = el('div', 'm-maintenance');
+  const routing = el('div', 'm-unrouted');
   const waiting = el('div', 'm-waiting');
   const error = el('div', 'm-error');
   const deps = el('div', 'm-deps');
@@ -248,7 +249,7 @@ function monitorCard(monitor) {
   };
 
   const edit = el('button', 'tiny ghost', 'Edit');
-  edit.onclick = () => openEditor(current);
+  edit.onclick = () => openEditor(current).catch((err) => banner(err.message, 'err'));
 
   const remove = el('button', 'tiny ghost danger', 'Delete');
   remove.onclick = async () => {
@@ -262,7 +263,7 @@ function monitorCard(monitor) {
   };
 
   actions.append(check, pause, el('span', 'spacer'), edit, remove);
-  card.append(head, target, maintenance, waiting, error, deps, spark.node, spark.summary, stats, actions);
+  card.append(head, target, maintenance, routing, waiting, error, deps, spark.node, spark.summary, stats, actions);
 
   function update(next) {
     current = next;
@@ -296,6 +297,12 @@ function monitorCard(monitor) {
       const since = next.downSinceMs != null ? ` - down ${duration(next.downSinceMs)}` : '';
       setText(error, `${next.lastResult.error}${since}`);
     }
+
+    // Only worth saying when it is a problem: a monitor routed nowhere looks
+    // exactly like a healthy one until something breaks.
+    const unrouted = !next.paused && (next.channels?.length ?? 0) === 0;
+    setShown(routing, unrouted);
+    if (unrouted) setText(routing, 'No notification channel — alerts for this monitor are dropped');
 
     setShown(deps, next.dependentCount > 0);
     if (next.dependentCount > 0) {
@@ -430,8 +437,8 @@ function renderSummary(monitors, notificationsConfigured, authRequired) {
   if (!notificationsConfigured) {
     // Lives in the summary bar, not the banner, so the 10s refresh does not
     // clobber whatever transient banner the user just triggered.
-    const warn = el('span', 'config-warning', 'ntfy not configured - alerts are being dropped');
-    warn.title = 'Set NTFY_TOPIC and restart';
+    const warn = el('span', 'config-warning', 'No notification channel - alerts are being dropped');
+    warn.title = 'Add one under Channels';
     summary.append(warn);
   }
   document.title = count('down') > 0 ? `(${count('down')} down) Uptime Sentinel` : 'Uptime Sentinel';
@@ -564,7 +571,7 @@ function descendantIdsOf(id) {
   return out;
 }
 
-function openEditor(monitor) {
+async function openEditor(monitor) {
   editingId = monitor?.id ?? null;
   const form = $('#editor-form');
   form.reset();
@@ -580,8 +587,45 @@ function openEditor(monitor) {
     form.elements.ignoreTls.checked = monitor.ignoreTls;
   }
   fillParentOptions(monitor);
+  // Wait for routing before showing the form. Otherwise a fast Save can
+  // mistake "not loaded yet" for "use the defaults" and erase the route.
+  await fillChannelOptions(monitor);
   syncEditorType();
   $('#editor').showModal();
+}
+
+/**
+ * Fill the "Send alerts to" picker.
+ *
+ * Routing is its own endpoint rather than a monitor field, so the current
+ * selection is fetched separately -- and only for an existing monitor, since a
+ * new one has nothing to fetch and starts on the defaults.
+ */
+async function fillChannelOptions(monitor) {
+  const picker = $('#editor-form').elements.channelIds;
+  const hint = $('#channels-hint');
+  picker.replaceChildren();
+
+  // Failure must keep the editor closed: saving with an empty picker after a
+  // failed read would silently reset an existing monitor to the defaults.
+  lastChannels = await api('/api/channels');
+
+  const defaults = lastChannels.filter((c) => c.enabled && c.isDefault).map((c) => c.name);
+  hint.textContent =
+    defaults.length > 0
+      ? `Select none to use the default channels (${defaults.join(', ')}).`
+      : 'Select none to use the default channels — none are marked default, so nothing would be sent.';
+
+  for (const channel of lastChannels) {
+    const option = el('option', null, channel.enabled ? channel.name : `${channel.name} (off)`);
+    option.value = String(channel.id);
+    picker.append(option);
+  }
+
+  if (!monitor) return;
+  const { channelIds } = await api(`/api/monitors/${monitor.id}/channels`);
+  const chosen = new Set(channelIds.map(String));
+  for (const option of picker.options) option.selected = chosen.has(option.value);
 }
 
 async function saveEditor(event) {
@@ -616,9 +660,25 @@ async function saveEditor(event) {
     payload.jsonExpected = null;
   }
 
+  const channelIds = [...f.channelIds.selectedOptions].map((o) => Number(o.value));
+
   try {
-    if (editingId) await api(`/api/monitors/${editingId}`, { method: 'PATCH', body: JSON.stringify(payload) });
-    else await api('/api/monitors', { method: 'POST', body: JSON.stringify(payload) });
+    // Routing is a separate resource, so it is written after the monitor
+    // exists -- which is also the only way a brand-new monitor can have an id
+    // to attach it to.
+    const saved = editingId
+      ? await api(`/api/monitors/${editingId}`, { method: 'PATCH', body: JSON.stringify(payload) })
+      : await api('/api/monitors', { method: 'POST', body: JSON.stringify(payload) });
+    // Routing is a second request. If it fails after creation, retain the new
+    // id so a retry updates that monitor instead of creating a duplicate.
+    if (editingId === null) {
+      editingId = saved.id;
+      $('#editor-title').textContent = `Edit ${saved.name}`;
+    }
+    await api(`/api/monitors/${saved.id}/channels`, {
+      method: 'PUT',
+      body: JSON.stringify({ channelIds }),
+    });
     $('#editor').close();
     await refresh();
   } catch (err) {
@@ -730,6 +790,9 @@ function renderImportReport(report) {
     'report-line warn',
   );
   line('Credentials to re-enter afterwards', report.needCredentials, 'report-line warn');
+  line('Add channel', report.channelsCreated ?? []);
+  line('Update channel', report.channelsUpdated ?? []);
+  line('Channel credentials to re-enter afterwards', report.channelsNeedCredentials ?? [], 'report-line warn');
   line('Add maintenance window', report.maintenanceCreated ?? []);
   line('Update maintenance window', report.maintenanceUpdated ?? []);
   for (const message of report.errors) host.appendChild(el('p', 'report-line error', message));
@@ -867,6 +930,187 @@ function start() {
     });
   tick();
   timer = setInterval(tick, REFRESH_MS);
+}
+
+// ---------------------------------------------------------------- channels
+
+/**
+ * The fields each channel type needs, mirroring CHANNEL_SCHEMA on the server.
+ *
+ * Duplicated deliberately: there is no build step here, so the dashboard
+ * cannot import the server module. The server validates regardless, so the
+ * worst a drift causes is a 400 with a readable message rather than bad data.
+ */
+const CHANNEL_FIELDS = {
+  ntfy: [
+    { key: 'url', label: 'Server', placeholder: 'https://ntfy.sh' },
+    { key: 'topic', label: 'Topic', placeholder: 'my-alerts', required: true },
+    { key: 'token', label: 'Access token', placeholder: '(only for a protected server)', secret: true },
+    { key: 'downPriority', label: 'Priority for DOWN', type: 'number', min: 1, max: 5, value: 5 },
+    { key: 'upPriority', label: 'Priority for RECOVERED', type: 'number', min: 1, max: 5, value: 3 },
+  ],
+  discord: [
+    { key: 'webhookUrl', label: 'Webhook URL', placeholder: 'https://discord.com/api/webhooks/...', required: true, secret: true },
+    { key: 'username', label: 'Post as', placeholder: 'Uptime Sentinel' },
+  ],
+};
+
+const REDACTED = '<redacted>';
+
+/** Channels as last fetched, so the monitor editor can list them. */
+let lastChannels = [];
+let editingChannelId = null;
+
+function renderChannelFields(channel = null) {
+  const host = $('#channel-fields');
+  const type = $('#channels-form').elements.type.value;
+  host.replaceChildren();
+
+  for (const spec of CHANNEL_FIELDS[type] ?? []) {
+    const label = el('label', 'wide');
+    label.append(document.createTextNode(spec.label));
+    const input = el('input');
+    input.name = `config.${spec.key}`;
+    if (spec.type) input.type = spec.type;
+    if (spec.placeholder) input.placeholder = spec.placeholder;
+    if (spec.min != null) input.min = String(spec.min);
+    if (spec.max != null) input.max = String(spec.max);
+    const stored = channel?.config?.[spec.key];
+    if (stored !== undefined && stored !== REDACTED) input.value = String(stored);
+    else if (stored === REDACTED) input.placeholder = 'Stored; leave blank to keep it';
+    else if (spec.value != null) input.value = String(spec.value);
+    if (spec.required && stored !== REDACTED) input.required = true;
+    label.append(input);
+    if (spec.secret) label.append(el('small', null, 'Stored write-only; it is never shown again.'));
+    host.append(label);
+  }
+}
+
+function renderChannelsList(channels) {
+  const host = $('#channels-list');
+  host.replaceChildren();
+
+  if (channels.length === 0) {
+    host.append(el('p', 'hint warn', 'No channels yet — alerts are being dropped. Add one below.'));
+    return;
+  }
+
+  for (const c of channels) {
+    const row = el('div', 'mw-row');
+    const text = el('div', 'mw-text');
+    text.append(el('b', null, c.name));
+    text.append(el('span', 'mw-when', `${c.type}${c.isDefault ? ' · default' : ''}`));
+    if (!c.enabled) text.append(el('span', 'mw-off', 'Switched off'));
+
+    const testBtn = el('button', 'tiny ghost', 'Test');
+    testBtn.onclick = async () => {
+      testBtn.disabled = true;
+      try {
+        await api('/api/test-notification', { method: 'POST', body: JSON.stringify({ channelId: c.id }) });
+        banner(`Test alert sent to "${c.name}"`, 'ok');
+      } catch (err) {
+        banner(err.message, 'err');
+      } finally {
+        testBtn.disabled = false;
+      }
+    };
+
+    const edit = el('button', 'tiny ghost', 'Edit');
+    edit.onclick = () => {
+      editingChannelId = c.id;
+      const form = $('#channels-form');
+      form.reset();
+      form.elements.name.value = c.name;
+      form.elements.type.value = c.type;
+      form.elements.isDefault.checked = c.isDefault;
+      $('#channel-form-title').textContent = `Edit ${c.name}`;
+      $('#channels-save').textContent = 'Save channel';
+      renderChannelFields(c);
+    };
+
+    const toggle = el('button', 'tiny ghost', c.enabled ? 'Switch off' : 'Switch on');
+    toggle.onclick = async () => {
+      try {
+        await api(`/api/channels/${c.id}`, { method: 'PATCH', body: JSON.stringify({ enabled: !c.enabled }) });
+        await openChannels();
+        await refresh();
+      } catch (err) {
+        banner(err.message, 'err');
+      }
+    };
+
+    const remove = el('button', 'tiny ghost danger', 'Delete');
+    remove.onclick = async () => {
+      if (!confirm(`Delete "${c.name}"? Monitors that used only this channel fall back to the defaults.`)) return;
+      try {
+        await api(`/api/channels/${c.id}`, { method: 'DELETE' });
+        await openChannels();
+        await refresh();
+      } catch (err) {
+        banner(err.message, 'err');
+      }
+    };
+
+    const actions = el('div', 'mw-actions');
+    actions.append(testBtn, edit, toggle, remove);
+    row.append(text, actions);
+    host.append(row);
+  }
+}
+
+function resetChannelForm() {
+  editingChannelId = null;
+  $('#channels-form').reset();
+  $('#channel-form-title').textContent = 'Add a channel';
+  $('#channels-save').textContent = 'Add channel';
+  renderChannelFields();
+}
+
+async function openChannels() {
+  $('#channels-error').classList.add('hidden');
+  resetChannelForm();
+  try {
+    lastChannels = await api('/api/channels');
+    renderChannelsList(lastChannels);
+  } catch (err) {
+    banner(err.message, 'err');
+    return;
+  }
+  if (!$('#channels').open) $('#channels').showModal();
+}
+
+async function saveChannel(event) {
+  event.preventDefault();
+  const form = $('#channels-form');
+  const error = $('#channels-error');
+  error.classList.add('hidden');
+
+  const type = form.elements.type.value;
+  const config = {};
+  for (const spec of CHANNEL_FIELDS[type] ?? []) {
+    const value = form.elements[`config.${spec.key}`]?.value.trim();
+    if (value) config[spec.key] = spec.type === 'number' ? Number(value) : value;
+  }
+
+  try {
+    const payload = {
+      name: form.elements.name.value.trim(),
+      type,
+      isDefault: form.elements.isDefault.checked,
+      config,
+    };
+    const editing = editingChannelId !== null;
+    await api(editing ? `/api/channels/${editingChannelId}` : '/api/channels', {
+      method: editing ? 'PATCH' : 'POST',
+      body: JSON.stringify(editing ? payload : { ...payload, enabled: true }),
+    });
+    await openChannels();
+    await refresh();
+    banner(editing ? 'Channel updated' : 'Channel added', 'ok');
+  } catch (err) {
+    error.textContent = err.message;
+    error.classList.remove('hidden');
+  }
 }
 
 // ------------------------------------------------------------- maintenance
@@ -1030,7 +1274,7 @@ async function saveMaintenance(event) {
   }
 }
 
-$('#btn-add').onclick = () => openEditor(null);
+$('#btn-add').onclick = () => openEditor(null).catch((err) => banner(err.message, 'err'));
 $('#editor-cancel').onclick = () => $('#editor').close();
 $('#editor-form').addEventListener('submit', saveEditor);
 $('#editor-form').elements.type.addEventListener('change', syncEditorType);
@@ -1065,6 +1309,11 @@ $('#btn-export').onclick = () => {
 $('#export-cancel').onclick = () => $('#export').close();
 $('#export-form').addEventListener('submit', doExport);
 
+$('#btn-channels').onclick = () => openChannels().catch((err) => banner(err.message, 'err'));
+$('#channels-cancel').onclick = () => $('#channels').close();
+$('#channels-form').addEventListener('submit', saveChannel);
+$('#channels-form').elements.type.addEventListener('change', () => renderChannelFields());
+
 $('#btn-maintenance').onclick = () => openMaintenance().catch((err) => banner(err.message, 'err'));
 $('#maintenance-cancel').onclick = () => $('#maintenance').close();
 $('#maintenance-form').addEventListener('submit', saveMaintenance);
@@ -1085,7 +1334,7 @@ $('#btn-test').onclick = async () => {
     const res = await api('/api/test-notification', { method: 'POST', body: JSON.stringify({}) });
     const failed = res.results.filter((r) => !r.ok);
     if (failed.length) banner(`Test failed: ${failed.map((r) => `${r.channel}: ${r.error}`).join('; ')}`, 'err');
-    else banner('Test notification sent to ntfy.', 'ok');
+    else banner('Test notification sent.', 'ok');
   } catch (err) {
     banner(err.message, 'err');
   } finally {
