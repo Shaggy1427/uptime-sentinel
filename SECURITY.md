@@ -218,13 +218,13 @@ reverse proxy, every request arrives from the proxy's address, so all clients
 share one bucket and one abusive client throttles everybody.
 
 `TRUST_PROXY=true` turns on Fastify's `trustProxy`, which makes the app read
-`X-Forwarded-For` and treat the address in it as the client.
+`X-Forwarded-For` for the client address and `X-Forwarded-Host` /
+`X-Forwarded-Proto` for same-origin request checks.
 
-**Set it only when a reverse proxy you control is actually setting that
-header.** If nothing strips and rewrites `X-Forwarded-For` on the way in, any
-client can send an arbitrary one, present a different address on every request,
-and never hit a rate limit at all — including the login limit. Turning this on
-without a proxy in front of it converts brute-force protection into a formality.
+**Set it only when a reverse proxy you control is actually replacing those
+headers.** Otherwise a client can spoof its address to evade rate limits or
+spoof the public origin used by the CSRF guard. Turning this on without a proxy
+in front of it converts both protections into formalities.
 
 The variable must be the exact string `true`. Anything else, including `1`,
 `yes` and `TRUE`, leaves it off. That is deliberate: an ambiguous truthiness
@@ -430,8 +430,9 @@ A short checklist, in the order that matters:
    fully trust. Use a generated random string.
 2. **Put TLS in front of it** if it leaves the LAN, and set `PUBLIC_URL` to the
    `https://` URL so the session cookie gains `Secure`.
-3. **Set `TRUST_PROXY=true` only** when a reverse proxy you control is actually
-   setting `X-Forwarded-For` — and never otherwise.
+3. **Set `TRUST_PROXY=true` only** when a reverse proxy you control is replacing
+   `X-Forwarded-For`, `X-Forwarded-Host`, and `X-Forwarded-Proto` — never
+   otherwise.
 4. **Use a long, random `NTFY_TOPIC`.** On the public ntfy server a topic name
    is effectively a password: anyone who knows it can read your alerts, which
    name your hosts and their outages. Use `NTFY_TOKEN` with a protected topic,

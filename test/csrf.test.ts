@@ -62,7 +62,7 @@ test('cross-origin PATCH is rejected with 403', async () => {
   }
 });
 
-test('same-origin PATCH is allowed (no Origin header)', async () => {
+test('same-origin PATCH is allowed with or without Origin', async () => {
   const created = await app.inject({
     method: 'POST',
     url: '/api/monitors',
@@ -73,29 +73,47 @@ test('same-origin PATCH is allowed (no Origin header)', async () => {
 
   const id = created.json().id;
   try {
-    // No Origin header = same-origin request from a browser. Should pass.
-    const res = await app.inject({
+    const withOrigin = await app.inject({
+      method: 'PATCH',
+      url: `/api/monitors/${id}`,
+      headers: {
+        ...auth,
+        'content-type': 'application/json',
+        host: 'sentinel.example',
+        origin: 'http://sentinel.example',
+      },
+      payload: { paused: true },
+    });
+    assert.equal(withOrigin.statusCode, 200);
+
+    const withoutOrigin = await app.inject({
       method: 'PATCH',
       url: `/api/monitors/${id}`,
       headers: { ...auth, 'content-type': 'application/json' },
-      payload: { paused: true },
+      payload: { paused: false },
     });
-    assert.equal(res.statusCode, 200);
+    assert.equal(withoutOrigin.statusCode, 200);
   } finally {
     await app.inject({ method: 'DELETE', url: `/api/monitors/${id}`, headers: auth });
   }
 });
 
-test('cross-origin /api/login is allowed (login itself is the cross-origin entry point)', async () => {
-  // Login is the one endpoint that must accept a cross-origin POST: a user
-  // hitting the dashboard for the first time does not have a session cookie
-  // and the browser does not have an Origin allow-list for the API yet.
-  // The defense here is content-type, not origin.
+test('cross-origin JSON login is rejected with 403', async () => {
   const res = await app.inject({
     method: 'POST',
     url: '/api/login',
     headers: { 'content-type': 'application/json', origin: 'http://attacker.example' },
     payload: { password: 'hunter2' },
   });
-  assert.equal(res.statusCode, 200, `expected 200 (login must accept cross-origin JSON), got ${res.statusCode}`);
+  assert.equal(res.statusCode, 403, `expected 403, got ${res.statusCode}: ${res.body}`);
+});
+
+test('same host on a different scheme is still cross-origin', async () => {
+  const res = await app.inject({
+    method: 'POST',
+    url: '/api/login',
+    headers: { host: 'sentinel.example', origin: 'https://sentinel.example' },
+    payload: { password: 'hunter2' },
+  });
+  assert.equal(res.statusCode, 403, `expected 403, got ${res.statusCode}: ${res.body}`);
 });

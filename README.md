@@ -956,7 +956,7 @@ clamped value, so a typo is visible immediately rather than three weeks later.
 | `HOST` | string | `0.0.0.0` | — | `127.0.0.1` accepts only local connections |
 | `PUBLIC_URL` | URL | *(empty)* | must parse, scheme `http:` or `https:` | Trailing slashes are stripped. Used as the tap-through `Click` link on ntfy notifications, and decides whether the session cookie gets the `Secure` flag. A non-URL or non-http scheme is a startup error, because it flows into three places that misbehave quietly on garbage |
 | `AUTH_PASSWORD` | string | *(empty)* | — | Blank disables auth entirely. See [Security](#security) |
-| `TRUST_PROXY` | string | *(empty)* | exactly `true` enables it | Honour `X-Forwarded-For` so rate limits key on the real client. Only set it behind a proxy you control |
+| `TRUST_PROXY` | string | *(empty)* | exactly `true` enables it | Honour trusted `X-Forwarded-For`, `X-Forwarded-Host`, and `X-Forwarded-Proto` values for rate limits and same-origin checks. Only set it behind a proxy you control |
 | `LOG_LEVEL` | string | `warn` | Fastify levels | `fatal`, `error`, `warn`, `info`, `debug`, `trace`, `silent` |
 
 ### Storage
@@ -1489,9 +1489,9 @@ configuration, and once `AUTH_PASSWORD` is set it returns only `ok` and
 `uptimeS` — the version string and monitor counts are withheld.
 
 **Behind a reverse proxy**, set `TRUST_PROXY=true` so rate limits key on the
-real client rather than on the proxy. Do not set it otherwise: without a proxy
-stripping the header, clients could spoof `X-Forwarded-For` and evade
-throttling.
+real client and same-origin checks see the public host and protocol. The proxy
+must replace `X-Forwarded-For`, `X-Forwarded-Host`, and `X-Forwarded-Proto`; do
+not enable this for forwarded headers supplied directly by clients.
 
 **5xx error bodies are always the literal `Internal error`.** The real message
 stays in the log, because it may carry filesystem paths, SQL, or internal

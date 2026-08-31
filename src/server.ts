@@ -251,62 +251,39 @@ export async function buildServer() {
       const unsigned = req.unsignCookie(raw);
       if (unsigned.valid && unsigned.value === 'ok') return;
     }
-return reply.code(401).send({ error: 'Unauthorized' });
+    return reply.code(401).send({ error: 'Unauthorized' });
   });
 
-  // CSRF / request-shape guard for state-changing routes.
-  //
-  // SameSite=Lax on the session cookie stops a classic cross-site <form>
-  // POST, but does not stop:
-  //   - a cross-site form submission with enctype="text/plain" whose body is
-  //     shaped like JSON. The form sends without a preflight, the server's
-  //     JSON parser accepts the body, and /api/login is reached without a
-  //     cookie anyway. The attacker then logs the victim into *their* account
-  //     (login-CSRF).
-  //   - a cross-site fetch with the victim's session cookie (the default
-  //     fetch credentials) if SameSite is not enforced by an older browser
-  //     or is bypassed by a same-site subresource.
-  //
-  // Two cheap defenses:
-  //   1. If the request carries a body, the Content-Type must be
-  //      application/json. text/plain can carry JSON-shaped bodies via form
-  //      submissions; requiring JSON on body-bearing requests is what fastify
-  //      is already tuned for. Body-less methods (DELETE, OPTIONS) are
-  //      exempt since they have nothing to inspect.
-  //   2. Reject any state-changing request whose Origin host does not match
-  //      the request Host. Browsers send Origin on cross-origin POSTs and
-  //      PATCHes by default; same-origin requests do not send it, so a
-  //      missing Origin on a non-login state-changing request is allowed
-  //      (same-origin dashboards do not always set it).
+  // A simple cross-origin form can send text/plain but not application/json,
+  // so body-bearing writes must use the same JSON media type as the API. When
+  // a browser supplies Origin, require the complete origin (scheme, host and
+  // port) to match Fastify's proxy-aware view of this request. Origin remains
+  // optional so curl, monitoring tools and older same-origin clients work.
   app.addHook('preHandler', async (req, reply) => {
     const method = req.method.toUpperCase();
     if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return;
 
-    const ct = req.headers['content-type'] ?? '';
-    const contentLength = Number(req.headers['content-length'] ?? '0') || 0;
-    // Body-bearing requests must be application/json. fastify inject tests
-    // set a content-length of 0 for DELETE without a payload; in that case
-    // the Content-Type check is moot.
-    if ((contentLength > 0 || ct !== '') && !/^application\/json(\b|;)/.test(ct)) {
+    // Inspect the parsed body rather than Content-Length: HTTP/1.1 chunked and
+    // HTTP/2 requests can carry bodies without that header.
+    if (req.body !== undefined && req.mediaType !== 'application/json') {
       return reply.code(415).send({ error: 'Content-Type must be application/json' });
     }
 
     const origin = req.headers.origin;
     if (typeof origin === 'string' && origin !== '') {
-      let originHost: string;
       try {
-        originHost = new URL(origin).host;
+        const parsedOrigin = new URL(origin);
+        const requestOrigin = new URL(`${req.protocol}://${req.host}`).origin;
+        if (parsedOrigin.origin !== origin || parsedOrigin.origin !== requestOrigin) {
+          return reply.code(403).send({ error: 'Cross-origin request blocked' });
+        }
       } catch {
-        return reply.code(400).send({ error: 'Invalid Origin' });
-      }
-      const reqHost = req.headers.host ?? '';
-      if (originHost !== reqHost && req.routeOptions?.url !== '/api/login') {
         return reply.code(403).send({ error: 'Cross-origin request blocked' });
       }
     }
   });
 
-app.setErrorHandler((err: FastifyError, _req, reply) => {
+  app.setErrorHandler((err: FastifyError, _req, reply) => {
     if (err instanceof ValidationError) return reply.code(400).send({ error: err.message });
 
     const status = err.statusCode ?? 500;
