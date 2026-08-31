@@ -51,6 +51,14 @@ export interface Check extends CheckResult {
   id: number;
   monitorId: number;
   checkedAt: number;
+  /**
+   * The maintenance window that was open when this check ran, or null.
+   *
+   * Set rather than skipped so the latency history survives a planned outage:
+   * the uptime aggregates exclude tagged rows, but the dashboard can still
+   * show that the service came back before the window closed.
+   */
+  maintenanceId: number | null;
 }
 
 export interface Incident {
@@ -65,4 +73,62 @@ export interface Incident {
   checksFailed: number;
 }
 
-export type MonitorStatus = 'up' | 'down' | 'pending' | 'paused' | 'suppressed';
+export type MonitorStatus = 'up' | 'down' | 'pending' | 'paused' | 'suppressed' | 'maintenance';
+
+/**
+ * A scheduled window during which a monitor's failures are expected.
+ *
+ * Split from MaintenanceWindow so the scheduler can ask "which windows cover
+ * this monitor" without also paying for the reverse lookup, and so
+ * `maintenance.ts` can evaluate a schedule without knowing anything about
+ * monitors at all.
+ *
+ * Modelled as a discriminated union rather than one interface with everything
+ * optional: a 'once' window has no weekday bitmask in any meaningful sense,
+ * and letting one exist in the type means every reader has to handle a shape
+ * the database can never produce.
+ */
+interface MaintenanceCommon {
+  id: number;
+  name: string;
+  /** IANA zone the wall-clock fields are read in. Empty means the server's own. */
+  timezone: string;
+  /** A window switched off by the operator without being deleted. */
+  active: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface OnceRule extends MaintenanceCommon {
+  strategy: 'once';
+  /** Absolute instants; no timezone is involved. */
+  startsAt: number;
+  endsAt: number;
+}
+
+export interface WeeklyRule extends MaintenanceCommon {
+  strategy: 'weekly';
+  /** Minutes past local midnight in `timezone`, 0-1439. */
+  startMin: number;
+  /** Real elapsed seconds from the start, so a DST day does not stretch it. */
+  durationS: number;
+  /** Bitmask of the days it runs on; bit 0 is Sunday, bit 6 is Saturday. */
+  weekdays: number;
+}
+
+export type MaintenanceRule = OnceRule | WeeklyRule;
+
+/** A rule plus the monitors it covers. What the API and the export file carry. */
+export type MaintenanceWindow = MaintenanceRule & { monitorIds: number[] };
+
+/**
+ * A window as it arrives from the API, before it has an id.
+ *
+ * `Omit` is applied through a distributive conditional rather than directly:
+ * a bare `Omit<MaintenanceWindow, ...>` over a union collapses it to only the
+ * keys both arms share, which would quietly throw away every schedule field
+ * and leave the input type unable to describe either strategy.
+ */
+type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
+
+export type MaintenanceInput = DistributiveOmit<MaintenanceWindow, 'id' | 'createdAt' | 'updatedAt'>;

@@ -9,6 +9,46 @@ const TAGS: Record<NotificationEvent['kind'], string> = {
   test: 'wave',
 };
 
+const ERROR_DETAIL_CAP_BYTES = 1024;
+
+/** Read enough of an error response to diagnose it, then release the stream. */
+async function errorDetail(res: Response): Promise<string> {
+  const reader = res.body?.getReader();
+  if (!reader) return '';
+
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  let done = false;
+  try {
+    while (size < ERROR_DETAIL_CAP_BYTES) {
+      const next = await reader.read();
+      done = next.done;
+      if (done) break;
+      if (!next.value) continue;
+
+      // Copy only the bounded prefix. Keeping a subarray would retain the
+      // response's whole backing buffer until the error message is built.
+      const chunk = new Uint8Array(
+        next.value.subarray(0, ERROR_DETAIL_CAP_BYTES - size),
+      );
+      chunks.push(chunk);
+      size += chunk.byteLength;
+      if (chunk.byteLength < next.value.byteLength) break;
+    }
+  } finally {
+    if (!done) await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes).slice(0, 200);
+}
+
 function title(event: NotificationEvent): string {
   const name = event.monitor.name;
   switch (event.kind) {
@@ -79,8 +119,14 @@ export const ntfyChannel: Channel = {
     });
 
     if (!res.ok) {
-      const detail = await res.text().catch(() => '');
-      throw new Error(`ntfy responded ${res.status}: ${detail.slice(0, 200)}`);
+      const detail = await errorDetail(res).catch(() => '');
+      throw new Error(`ntfy responded ${res.status}: ${detail}`);
     }
+
+    // A successful response body is not otherwise useful, but it still has to
+    // be consumed or cancelled. Leaving it open keeps the underlying undici
+    // connection occupied until garbage collection, so every alert can strand
+    // another socket instead of returning it to the pool promptly.
+    await res.body?.cancel().catch(() => {});
   },
 };
