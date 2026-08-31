@@ -6,6 +6,7 @@ import {
   getMonitor,
   insertCheck,
   listMonitors,
+  listMonitorsUnsorted,
   listOpenIncidents,
   markIncidentAlerted,
   markIncidentReminded,
@@ -125,7 +126,7 @@ export class Scheduler {
       if (!incidentByMonitor.has(incident.monitorId)) incidentByMonitor.set(incident.monitorId, incident);
     }
 
-    for (const monitor of listMonitors()) {
+    for (const monitor of listMonitorsUnsorted()) {
       const state = freshState();
       if (monitor.paused) {
         state.status = 'paused';
@@ -148,7 +149,7 @@ export class Scheduler {
     // (a paused monitor's incident, the failure streak) must run either way, or
     // a pause applied before start() -- or in a test that never calls it -- would
     // leave a stale open incident behind.
-    const monitors = listMonitors();
+    const monitors = listMonitorsUnsorted();
     const live = new Set(monitors.map((m) => m.id));
 
     for (const [id, timer] of this.timers) {
@@ -646,7 +647,7 @@ export class Scheduler {
   private computeMonitorStats(): { activeMonitors: number; slowestIntervalS: number } {
     let slowestIntervalS = 0;
     let activeMonitors = 0;
-    for (const m of listMonitors()) {
+    for (const m of listMonitorsUnsorted()) {
       if (m.paused) continue;
       activeMonitors++;
       if (m.intervalS > slowestIntervalS) slowestIntervalS = m.intervalS;

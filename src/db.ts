@@ -276,6 +276,17 @@ export function listMonitors(): Monitor[] {
   return (prepared('SELECT * FROM monitors ORDER BY name COLLATE NOCASE').all() as Row[]).map(toMonitor);
 }
 
+/**
+ * `listMonitors` without the name sort, for order-insensitive internal walks.
+ *
+ * ORDER BY COLLATE NOCASE makes SQLite build a temporary b-tree on every
+ * call. Scheduler reconciliation and health aggregation never care about the
+ * order; API responses and alert text keep using the sorted query.
+ */
+export function listMonitorsUnsorted(): Monitor[] {
+  return (prepared('SELECT * FROM monitors').all() as Row[]).map(toMonitor);
+}
+
 export function getMonitor(id: number): Monitor | null {
   const r = prepared('SELECT * FROM monitors WHERE id = ?').get(id) as Row | undefined;
   return r ? toMonitor(r) : null;
