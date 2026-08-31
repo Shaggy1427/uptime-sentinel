@@ -794,6 +794,33 @@ test('a dry-run import writes no window, and a bad one writes nothing at all', (
   assert.match(broken.errors.join(' '), /weekdays/);
 });
 
+test('an imported window refuses an ambiguous monitor name instead of guessing', () => {
+  store.createMonitor({
+    name: 'TARGET',
+    type: 'tcp',
+    target: '127.0.0.1:9',
+  });
+
+  const report = importConfig({
+    monitors: [],
+    maintenance: [
+      {
+        name: 'Ambiguous target',
+        strategy: 'weekly',
+        startMin: 0,
+        durationS: 3600,
+        weekdays: 1,
+        timezone: '',
+        active: true,
+        monitors: ['target'],
+      },
+    ],
+  });
+
+  assert.match(report.errors.join(' '), /"target" matches more than one monitor/);
+  assert.equal(store.listMaintenance().length, 0, 'no arbitrarily attached window is created');
+});
+
 test('a monitors-only file still imports, and windows are optional', () => {
   const report = importConfig([
     { name: 'seeded', type: 'ping', target: '127.0.0.1', intervalS: 60, timeoutMs: 5000,
