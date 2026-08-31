@@ -299,7 +299,7 @@ before routing, so a raw-string check like `req.url.startsWith('/api/')` misses
 `/%61pi/status`, which reaches the handler as `/api/status`. That was a real
 authentication bypass in this codebase; see [SECURITY.md](SECURITY.md). The
 guard covers everything under `/api/` plus `/metrics`, minus the open routes
-`/api/health`, `/api/login` and `/api/auth`.
+`/api/health` and `/api/login`.
 
 ### Monitor headers are write-only
 
