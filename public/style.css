@@ -8,7 +8,10 @@
   --up: #3fb950;
   --down: #f85149;
   --pending: #d29922;
-  --paused: #6e7681;
+  /* Lightened from #6e7681, which was 3.77:1 on the card and therefore below
+     AA once the status was written out in words rather than shown as a dot.
+     It is still the quietest colour in the set, which is the intent. */
+  --paused: #848d97;
   --maintenance: #a371f7;
   --accent: #58a6ff;
   --radius: 10px;
@@ -18,10 +21,61 @@
   :root {
     --bg: #f4f6f8; --panel: #ffffff; --panel-2: #f0f3f6; --line: #d8dee4;
     --text: #1f2328; --muted: #656d76; --accent: #0969da;
+
+    /*
+     * The status colours were tuned for the dark theme and were never
+     * overridden here, so light mode used them at 2.5:1 against white --
+     * roughly half the 4.5:1 that small text needs. They are used as text in
+     * several places (the status badge, the error line, the incident pills),
+     * so this was a real legibility failure, not a theoretical one.
+     *
+     * Measured against both surfaces this theme puts text on, #ffffff panels
+     * and the #f4f6f8 page: every value below clears 4.5:1 on both.
+     */
+    --up: #1a7f37;
+    --down: #cf222e;
+    --pending: #8a5d00;
+    --paused: #5b6169;
+    --maintenance: #8250df;
   }
 }
 
 * { box-sizing: border-box; }
+
+/*
+ * Keyboard focus, everywhere.
+ *
+ * The old rule styled `input, select` only, so the twenty buttons in this
+ * dashboard had no visible focus at all -- tabbing through it showed nothing.
+ * `:focus-visible` rather than `:focus` so the ring appears for keyboard and
+ * programmatic focus without ringing every mouse click, which is why the
+ * original rule was probably kept narrow in the first place.
+ *
+ * Offset outwards, not inwards: an inset outline on a bordered input reads as
+ * a colour change rather than a ring.
+ */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+/* Inputs already carry a border, so the ring sits tight against it. */
+input:focus-visible, select:focus-visible { outline-offset: 0; }
+
+/*
+ * Nothing here is load-bearing: the pulse marks a state the colour and the
+ * status text already carry, and the sparkline transition only smooths a
+ * height change. Both are removed outright rather than shortened, because a
+ * vestibular trigger does not become acceptable by being brief.
+ */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
 
 body {
   margin: 0;
@@ -66,7 +120,12 @@ button.danger:hover { border-color: var(--down); color: var(--down); }
   background: color-mix(in srgb, var(--pending) 12%, transparent);
   border: 1px solid color-mix(in srgb, var(--pending) 40%, transparent);
 }
-.actions { margin-left: auto; display: flex; gap: .5rem; }
+/*
+ * Wraps. The topbar itself already wrapped, but this row did not, so once the
+ * action count grew the buttons ran off the side of a phone and took the
+ * document's scroll width with them.
+ */
+.actions { margin-left: auto; display: flex; flex-wrap: wrap; gap: .5rem; }
 
 main { max-width: 1280px; margin: 0 auto; padding: 1.25rem; }
 
@@ -84,7 +143,13 @@ main { max-width: 1280px; margin: 0 auto; padding: 1.25rem; }
   border-color: color-mix(in srgb, var(--up) 45%, transparent);
 }
 
-.grid { display: grid; gap: .9rem; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); }
+/*
+ * min(330px, 100%) rather than a bare 330px: a fixed minimum larger than the
+ * column itself makes the track overflow rather than shrink, so on a 360px
+ * phone (320px after the page padding) the cards pushed the whole document
+ * sideways. The min() clamps the floor to the space actually available.
+ */
+.grid { display: grid; gap: .9rem; grid-template-columns: repeat(auto-fill, minmax(min(330px, 100%), 1fr)); }
 
 .card {
   background: var(--panel); border: 1px solid var(--line);
@@ -110,8 +175,27 @@ main { max-width: 1280px; margin: 0 auto; padding: 1.25rem; }
 }
 .m-deps { font-size: .72rem; color: var(--muted); }
 
-.m-head { display: flex; align-items: baseline; gap: .5rem; }
+.m-head { display: flex; align-items: baseline; gap: .5rem; flex-wrap: wrap; }
 .m-name { font-weight: 600; }
+
+/*
+ * The status in words.
+ *
+ * Every state used to be conveyed by a border tint and a 9px dot, so "up",
+ * "pending" and "paused" were indistinguishable without colour vision. The
+ * dot stays as the at-a-glance cue and is hidden from assistive tech; this
+ * badge is what actually says which state it is.
+ */
+.m-state {
+  font-size: .68rem; letter-spacing: .06em; text-transform: uppercase;
+  border-radius: 4px; padding: .05rem .35rem; border: 1px solid currentColor;
+  color: var(--paused);
+}
+.up .m-state { color: var(--up); }
+.down .m-state { color: var(--down); }
+.pending .m-state { color: var(--pending); }
+.suppressed .m-state { color: var(--accent); }
+.maintenance .m-state { color: var(--maintenance); }
 .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--paused); flex: none; align-self: center; }
 .up .dot { background: var(--up); box-shadow: 0 0 0 3px color-mix(in srgb, var(--up) 22%, transparent); }
 .down .dot { background: var(--down); box-shadow: 0 0 0 3px color-mix(in srgb, var(--down) 22%, transparent); animation: pulse 1.6s infinite; }
@@ -149,6 +233,12 @@ main { max-width: 1280px; margin: 0 auto; padding: 1.25rem; }
 .m-actions .spacer { flex: 1; }
 
 .incidents { margin-top: 1.75rem; }
+/*
+ * The table scrolls inside its own box rather than widening the document.
+ * Without this a long cause string on a narrow screen pushes the whole page
+ * sideways, which moves the topbar and the cards along with it.
+ */
+.table-scroll { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: .85rem; }
 th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid var(--line); }
 th { color: var(--muted); font-weight: 500; font-size: .78rem; text-transform: uppercase; letter-spacing: .05em; }
@@ -176,7 +266,6 @@ input, select {
   border: 1px solid var(--line); background: var(--bg); color: var(--text);
 }
 input[type="checkbox"] { width: auto; accent-color: var(--accent); }
-input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 small { color: var(--muted); font-size: .72rem; }
 fieldset { border: 1px solid var(--line); border-radius: 8px; padding: .5rem .75rem 1rem; }
 legend { color: var(--muted); font-size: .78rem; padding: 0 .35rem; }
@@ -216,3 +305,47 @@ menu { display: flex; justify-content: flex-end; gap: .5rem; padding: 0; margin:
 .mw-actions { display: flex; gap: .35rem; flex: none; }
 .weekdays { display: flex; flex-wrap: wrap; gap: .1rem .7rem; }
 .weekdays .check { font-size: .8rem; }
+
+/* ---- responsive ----
+ *
+ * There were no breakpoints at all before this: the only media query in the
+ * file was prefers-color-scheme. These are the two widths where the layout
+ * actually breaks rather than arbitrary device sizes.
+ */
+
+/* The editor's two-column field grid stops fitting well before the page does. */
+@media (max-width: 560px) {
+  .fields { grid-template-columns: 1fr; }
+  .fields .wide { grid-column: auto; }
+  dialog { padding: 1rem; width: min(660px, 96vw); }
+  main { padding: 1rem .85rem; }
+
+  /* The action buttons need the full width once the brand and summary wrap,
+     otherwise `margin-left: auto` strands them in a narrow column. */
+  .actions { margin-left: 0; width: 100%; }
+  .actions button { flex: 1 1 auto; }
+  .topbar { gap: .75rem; padding: .75rem .85rem; }
+
+  /* A cause column capped at 340px is wider than the viewport. */
+  td.cause { max-width: 55vw; }
+}
+
+/* Below this the card's own action row is the thing that overflows. */
+@media (max-width: 380px) {
+  .m-actions { gap: .3rem; }
+  .m-actions .spacer { flex-basis: 100%; height: 0; }
+  .m-stats { gap: .75rem; }
+}
+
+/*
+ * Visible to assistive technology, not to the eye. Used for the sparkline's
+ * one-sentence equivalent: forty bars with tooltips are not navigable one at
+ * a time, so the row is aria-hidden and this carries the same information.
+ */
+.sr-only {
+  position: absolute;
+  width: 1px; height: 1px;
+  margin: -1px; padding: 0; border: 0;
+  clip-path: inset(50%);
+  overflow: hidden; white-space: nowrap;
+}

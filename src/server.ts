@@ -454,6 +454,11 @@ export async function buildServer() {
     return {
       generatedAt: now,
       notificationsConfigured: config.ntfy.topic !== '',
+      // So the dashboard can offer Log out. /api/auth was removed, which
+      // left the UI with no way to know a password is set -- and a button
+      // that never appears is the same as not having one. Not sensitive:
+      // reaching this route already requires auth when auth is on.
+      authRequired: config.authPassword !== '',
       monitors: monitors.map((m) => describe(m, ctx)),
     };
   });
