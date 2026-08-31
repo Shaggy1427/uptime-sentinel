@@ -38,7 +38,11 @@ channels.push({
 
 // Target whose status code the test flips between 503 and 200.
 let mode = 503;
-const origin = http.createServer((_req, res) => {
+let holdResponse: Promise<void> | null = null;
+let requestStarted = () => {};
+const origin = http.createServer(async (_req, res) => {
+  requestStarted();
+  if (holdResponse) await holdResponse;
   res.writeHead(mode);
   res.end();
 });
@@ -59,6 +63,8 @@ beforeEach(() => {
   attempts.length = 0;
   deliver = true;
   block = null;
+  holdResponse = null;
+  requestStarted = () => {};
   mode = 503;
   monitorId = store.createMonitor({
     name: 'target',
@@ -123,6 +129,30 @@ test('a concurrent runNow during alert dispatch does not start a second pass', a
 
   assert.equal(store.recentChecks(monitorId, 100).length, 1, 'only one check should have been recorded');
   assert.equal(store.listIncidents(100, monitorId).length, 1, 'only one incident should exist');
+});
+
+test('a result from before a monitor edit is not applied to the new configuration', async () => {
+  let release = () => {};
+  holdResponse = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let markStarted = () => {};
+  const started = new Promise<void>((resolve) => {
+    markStarted = resolve;
+  });
+  requestStarted = markStarted;
+
+  const check = scheduler.runNow(monitorId);
+  await started;
+
+  store.updateMonitor(monitorId, { name: 'replacement', target: 'https://example.com/' });
+
+  release();
+  const result = await check;
+  assert.equal(result?.ok, false, 'the caller still receives the completed old check');
+  assert.equal(store.recentChecks(monitorId, 10).length, 0, 'the stale result is not stored');
+  assert.equal(store.openIncidentFor(monitorId), null, 'the stale failure opens no incident');
+  assert.deepEqual(attempts, [], 'the stale failure sends no alert for the replacement target');
 });
 
 test('a manual check is refused while suppressed by a down dependency', async () => {
