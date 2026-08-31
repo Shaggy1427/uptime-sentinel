@@ -304,6 +304,15 @@ export async function buildServer() {
   // ---------------------------------------------------------------- health
 
   app.get('/api/health', async () => {
+    // The endpoint is public so a third-party dead-man's-switch (healthchecks.io
+    // and the like) can poll it. Once AUTH_PASSWORD is set the operator has said
+    // this instance is not for public eyes: the exact version string is a
+    // CVE-cross-referencing aid (CWE-200) and the monitor counts are
+    // infrastructure detail a liveness probe has no use for. `ok` and `uptimeS`
+    // are all it needs to tell the process is alive, so stop there -- and before
+    // walking the monitor list, since an authed instance polls this often.
+    if (authEnabled) return { ok: true, uptimeS: Math.round(process.uptime()) };
+
     const monitors = store.listMonitors();
     // One pass: each monitor is looked up once, paused ones are skipped
     // without a state lookup, and we count down/suppressed as we go instead

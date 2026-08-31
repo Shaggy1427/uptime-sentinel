@@ -1025,7 +1025,7 @@ curl -H 'Authorization: Bearer your-dashboard-password' \
 
 | Method | Path | Auth | Rate limit | Purpose |
 |--------|------|------|------------|---------|
-| `GET` | `/api/health` | never required | global | Liveness, version, and counts of monitors that are down or suppressed |
+| `GET` | `/api/health` | never required | global | Liveness. `ok` + `uptimeS` only when `AUTH_PASSWORD` is set; also `version` and down/suppressed counts when it is not |
 | `POST` | `/api/login` | never required | **10 per 5 minutes** | Body `{ "password": "…" }`. Sets the session cookie |
 | `POST` | `/api/logout` | required | global | Clears the session cookie |
 | `GET` | `/api/status` | required | global | Everything the dashboard renders, in one call |
@@ -1073,7 +1073,17 @@ returning `[]`.
 ### `GET /api/health`
 
 Deliberately unauthenticated so an external dead-man's-switch can poll it. It
-returns counts only, never targets or configuration.
+never returns targets or configuration.
+
+When `AUTH_PASSWORD` is set the body is trimmed to liveness only, so the public
+probe cannot be used to read off the exact version or the monitor counts:
+
+```json
+{ "ok": true, "uptimeS": 84213 }
+```
+
+When `AUTH_PASSWORD` is unset the instance is already fully open, so the full
+body is returned:
 
 ```json
 {
@@ -1475,7 +1485,8 @@ Both forms need the password when `AUTH_PASSWORD` is set.
 
 **`/api/health` is deliberately unauthenticated** so an external
 dead-man's-switch can poll liveness. It does not return targets or
-configuration.
+configuration, and once `AUTH_PASSWORD` is set it returns only `ok` and
+`uptimeS` — the version string and monitor counts are withheld.
 
 **Behind a reverse proxy**, set `TRUST_PROXY=true` so rate limits key on the
 real client rather than on the proxy. Do not set it otherwise: without a proxy
