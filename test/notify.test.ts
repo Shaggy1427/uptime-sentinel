@@ -11,6 +11,15 @@ process.env.AUTH_PASSWORD = '';
 
 const { ntfyChannel } = await import('../src/notify/ntfy.ts');
 
+const testEvent = {
+  kind: 'test',
+  monitor: { name: 'demo', type: 'http', target: 'https://example.com' },
+  reason: null,
+  downForMs: null,
+  incident: null,
+  at: Date.now(),
+} as Parameters<typeof ntfyChannel.send>[0];
+
 test('a successful ntfy send releases the response body', async () => {
   const originalFetch = globalThis.fetch;
   let cancelled = false;
@@ -26,14 +35,35 @@ test('a successful ntfy send releases the response body', async () => {
     );
 
   try {
-    await ntfyChannel.send({
-      kind: 'test',
-      monitor: { name: 'demo', type: 'http', target: 'https://example.com' },
-      reason: null,
-      downForMs: null,
-      incident: null,
-      at: Date.now(),
-    } as Parameters<typeof ntfyChannel.send>[0]);
+    await ntfyChannel.send(testEvent);
+    assert.equal(cancelled, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('an ntfy error response is capped and released', async () => {
+  const originalFetch = globalThis.fetch;
+  let pulls = 0;
+  let cancelled = false;
+
+  globalThis.fetch = async () =>
+    new Response(
+      new ReadableStream({
+        pull(controller) {
+          pulls++;
+          controller.enqueue(new Uint8Array(1024).fill(120));
+        },
+        cancel() {
+          cancelled = true;
+        },
+      }),
+      { status: 500 },
+    );
+
+  try {
+    await assert.rejects(() => ntfyChannel.send(testEvent), /ntfy responded 500: x+/);
+    assert.ok(pulls < 10, `read ${pulls} chunks from an unbounded response`);
     assert.equal(cancelled, true);
   } finally {
     globalThis.fetch = originalFetch;

@@ -109,8 +109,6 @@ even though it leaks nothing.
   configuration export, and `/metrics`.
 - `POST /api/login` returns `{ "ok": true }` for any input, because there is
   nothing to check against.
-- `GET /api/auth` returns `{ "required": false }`, so the dashboard shows no
-  login prompt.
 - The process prints a multi-line warning at startup spelling out that the API
   is open, that monitors can be created, and what that implies.
 
@@ -119,14 +117,13 @@ configuration for anything reachable from outside one.
 
 ### When it is set
 
-Everything under `/api/`, plus `/metrics`, requires credentials. Three routes
+Everything under `/api/`, plus `/metrics`, requires credentials. Two routes
 are deliberately exempt and are listed in `OPEN_ROUTES` in `src/server.ts`:
 
 | Open route | Why | What it discloses |
 |------------|-----|-------------------|
 | `GET /api/health` | So an external dead-man's-switch can poll liveness | `ok`, the version string, counts of monitors / down / suppressed, and process uptime. Never targets or configuration |
 | `POST /api/login` | It is the way in | Nothing beyond whether a password was correct |
-| `GET /api/auth` | So the dashboard knows whether to show a prompt | A single boolean: whether a password is required |
 
 **Two ways to authenticate:**
 
@@ -391,8 +388,6 @@ GitHub Actions workflows — the latter because a PR title interpolated into a
 - `GET /api/health` being reachable unauthenticated. This is deliberate so an
   external dead-man's-switch can poll it, and it returns only counts, a version
   string, and process uptime — never targets or configuration.
-- `GET /api/auth` being reachable unauthenticated. It returns one boolean:
-  whether a password is required.
 - Rate-limit evasion on an instance running with `TRUST_PROXY=true` and no
   reverse proxy in front of it. That is the documented failure mode of a
   setting you have to opt into.

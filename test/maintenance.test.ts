@@ -684,6 +684,37 @@ test('a paused monitor reads as paused even inside an open window', async () => 
   assert.equal(described.maintenance, null);
 });
 
+test('dependency suppression stays authoritative when maintenance overlaps it', async () => {
+  const app = await buildServer();
+  after(() => app.close());
+
+  const parentId = store.createMonitor({
+    name: 'router',
+    type: 'tcp',
+    target: '127.0.0.1:1',
+    retries: 1,
+    alertAfterS: 0,
+  }).id;
+  store.updateMonitor(monitorId, { parentId });
+
+  await scheduler.runNow(parentId);
+  await scheduler.runNow(monitorId);
+  assert.equal(scheduler.getState(monitorId)?.status, 'suppressed');
+
+  openWindowNow('overlap');
+
+  const described = (await app.inject({ method: 'GET', url: '/api/status' })).json()
+    .monitors.find((m: { id: number }) => m.id === monitorId);
+  assert.equal(described.status, 'suppressed');
+  assert.equal(described.suppressedBy, 'router');
+
+  const statuses = renderMetrics()
+    .split('\n')
+    .filter((line) => line.startsWith(`sentinel_monitor_status{id="${monitorId}",`) && line.endsWith(' 1'));
+  assert.equal(statuses.length, 1);
+  assert.match(statuses[0]!, /status="suppressed"/);
+});
+
 // --------------------------------------------------------------- metrics
 
 test('metrics report the maintenance status and the window gauges', () => {

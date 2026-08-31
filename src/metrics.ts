@@ -118,11 +118,14 @@ export function renderMetrics(now = Date.now()): string {
     // on sentinel_monitor_status{status="down"} stops firing when the
     // operator says maintenance has started, not a check interval later.
     const inMaintenance = !m.paused && openWindowByMonitor.has(m.id);
+    const liveStatus = state?.status ?? 'pending';
     const current: MonitorStatus = m.paused
       ? 'paused'
-      : inMaintenance
-        ? 'maintenance'
-        : (state?.status ?? 'pending');
+      : liveStatus === 'suppressed'
+        ? 'suppressed'
+        : inMaintenance
+          ? 'maintenance'
+          : liveStatus;
     counts[current] = (counts[current] ?? 0) + 1;
 
     // The label fragment every per-monitor family reuses, with the name

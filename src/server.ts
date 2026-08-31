@@ -24,7 +24,7 @@ const DAY = 86_400_000;
 /** Dependency-graph access handed to the validator; see ValidateOptions.graph. */
 const GRAPH: NonNullable<ValidateOptions['graph']> = store.graph;
 const AUTH_COOKIE = 'sentinel_auth';
-const OPEN_ROUTES = new Set(['/api/health', '/api/login', '/api/auth']);
+const OPEN_ROUTES = new Set(['/api/health', '/api/login']);
 
 /**
  * Monitor `headers` can hold credentials for the endpoint being monitored
@@ -161,10 +161,20 @@ function describe(monitor: Monitor, ctx: StatusContext) {
   // monitor's next tick -- which on a 5-minute interval is a long time to sit
   // watching a card that still says "down".
   const maintenance = monitor.paused ? null : (ctx.maintenanceByMonitor.get(monitor.id) ?? null);
+  const liveStatus = state?.status ?? 'pending';
 
   return {
     ...redact(monitor),
-    status: monitor.paused ? 'paused' : maintenance ? 'maintenance' : (state?.status ?? 'pending'),
+    // Dependency suppression is evaluated before maintenance by the
+    // scheduler: while an ancestor is down the result is unknowable, whether
+    // or not this monitor also has a window open. Keep that priority here.
+    status: monitor.paused
+      ? 'paused'
+      : liveStatus === 'suppressed'
+        ? 'suppressed'
+        : maintenance
+          ? 'maintenance'
+          : liveStatus,
     maintenance,
     parentName: parent?.name ?? null,
     // Named so the dashboard can say what a monitor is waiting on rather than
@@ -258,8 +268,6 @@ export async function buildServer() {
   });
 
   // ------------------------------------------------------------------ auth
-
-  app.get('/api/auth', async () => ({ required: authEnabled }));
 
   app.post(
     '/api/login',
