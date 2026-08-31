@@ -467,10 +467,18 @@ function prepareMaintenance(entries: unknown[], errors: string[]): PreparedWindo
 function applyMaintenance(prepared: PreparedWindow[], idByName: Map<string, number>, report: ImportReport): void {
   if (prepared.length === 0) return;
 
-  const monitorIdByName = new Map(idByName);
+  // Null marks a case-insensitive name that belongs to more than one row. The
+  // monitor importer and dependency resolver already refuse to guess in this
+  // situation; maintenance must do the same or a window can silently suppress
+  // alerts for whichever duplicate happened to sort first.
+  const monitorIdByName = new Map<string, number | null>(idByName);
   for (const monitor of store.listMonitors()) {
     const key = monitor.name.toLowerCase();
-    if (!monitorIdByName.has(key)) monitorIdByName.set(key, monitor.id);
+    if (!monitorIdByName.has(key)) {
+      monitorIdByName.set(key, monitor.id);
+    } else if (monitorIdByName.get(key) !== monitor.id) {
+      monitorIdByName.set(key, null);
+    }
   }
 
   const existingByName = new Map<string, MaintenanceWindow[]>();
@@ -491,10 +499,15 @@ function applyMaintenance(prepared: PreparedWindow[], idByName: Map<string, numb
 
     const monitorIds: number[] = [];
     let missing: string | null = null;
+    let ambiguous: string | null = null;
     for (const name of entry.monitors) {
       const id = monitorIdByName.get(name.toLowerCase());
       if (id === undefined) {
         missing = name;
+        break;
+      }
+      if (id === null) {
+        ambiguous = name;
         break;
       }
       monitorIds.push(id);
@@ -503,6 +516,10 @@ function applyMaintenance(prepared: PreparedWindow[], idByName: Map<string, numb
     // less than the file says, so it is refused rather than trimmed.
     if (missing !== null) {
       report.errors.push(`maintenance "${entry.name}": no monitor named "${missing}"`);
+      continue;
+    }
+    if (ambiguous !== null) {
+      report.errors.push(`maintenance "${entry.name}": monitor name "${ambiguous}" matches more than one monitor`);
       continue;
     }
 
