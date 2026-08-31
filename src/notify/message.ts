@@ -39,7 +39,7 @@ function body(event: NotificationEvent): string {
     if (resuming.length > 0) lines.push(`${resuming.length} monitor${resuming.length === 1 ? '' : 's'} behind this resume checking.`);
     if (incident?.cause) lines.push(`Last error: ${bodySafe(incident.cause)}`);
   } else if (event.kind === 'test') {
-    lines.push('If you can read this, ntfy is wired up correctly.');
+    lines.push('If you can read this, the notification channel is wired up correctly.');
   } else {
     if (downForMs !== null) lines.push(`Down for ${formatDuration(downForMs)}.`);
     if (reason) lines.push(`Error: ${bodySafe(reason)}`);

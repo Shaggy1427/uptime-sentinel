@@ -23,26 +23,34 @@
       <span class="logo" aria-hidden="true">&#128225;</span>
       <h1>Uptime Sentinel</h1>
     </div>
-    <div id="summary" class="summary"></div>
+    <!-- aria-live so a screen reader hears the counts change rather than
+         having to go looking for them; polite, because an outage is not worth
+         interrupting whatever is being read. -->
+    <div id="summary" class="summary" role="status" aria-live="polite" aria-label="Monitor summary"></div>
     <!-- Outside #summary on purpose: renderSummary replaces that element's
          children every poll, and does not run at all when a poll fails. -->
     <span id="connection" class="stale-warning hidden" role="status"></span>
-    <div class="actions">
+    <nav class="actions" aria-label="Dashboard actions">
       <button id="btn-export" class="ghost" title="Download every monitor as a JSON file">Export</button>
       <button id="btn-import" class="ghost" title="Add or update monitors from a JSON file">Import</button>
-      <button id="btn-test" class="ghost" title="Send a test notification to ntfy">Test alert</button>
+      <button id="btn-test" class="ghost" title="Send a test notification">Test alert</button>
       <button id="btn-maintenance" class="ghost" title="Schedule expected downtime">Maintenance</button>
       <button id="btn-channels" class="ghost" title="Where alerts are sent">Channels</button>
       <button id="btn-add" class="primary">Add monitor</button>
-    </div>
+      <!-- POST /api/logout has existed all along with nothing to call it.
+           Hidden until we know a password is actually set. -->
+      <button id="btn-logout" class="ghost hidden" title="End this session">Log out</button>
+    </nav>
   </header>
 
   <main>
-    <p id="banner" class="banner hidden"></p>
-    <section id="monitors" class="grid"></section>
+    <!-- assertive: a banner is the result of something the operator just did,
+         so it is worth interrupting for. -->
+    <p id="banner" class="banner hidden" role="alert" aria-live="assertive"></p>
+    <section id="monitors" class="grid" aria-label="Monitors"></section>
     <section class="incidents">
-      <h2>Recent incidents</h2>
-      <div id="incidents"></div>
+      <h2 id="incidents-heading">Recent incidents</h2>
+      <div id="incidents" class="table-scroll" aria-labelledby="incidents-heading"></div>
     </section>
   </main>
 
@@ -156,7 +164,7 @@
       <div id="channels-list" class="report"></div>
 
       <fieldset class="wide">
-        <legend>Add a channel</legend>
+        <legend id="channel-form-title">Add a channel</legend>
         <div class="fields">
           <label class="wide">Name<input name="name" required maxlength="120" placeholder="Loud phone alerts" /></label>
 
@@ -176,7 +184,7 @@
       <p id="channels-error" class="error hidden"></p>
       <menu>
         <button type="button" id="channels-cancel" class="ghost">Close</button>
-        <button type="submit" class="primary">Add channel</button>
+        <button type="submit" id="channels-save" class="primary">Add channel</button>
       </menu>
     </form>
   </dialog>

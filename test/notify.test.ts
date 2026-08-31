@@ -10,9 +10,12 @@ process.env.NTFY_TOPIC = 'test-topic';
 process.env.AUTH_PASSWORD = '';
 
 const { ntfyType } = await import('../src/notify/ntfy.ts');
+const { discordType } = await import('../src/notify/discord.ts');
+const { body } = await import('../src/notify/message.ts');
 
 /** Settings arrive per call now rather than from NTFY_* at module load. */
 const NTFY_CONFIG = { url: 'https://ntfy.example', topic: 'test-topic' };
+const DISCORD_CONFIG = { webhookUrl: 'https://discord.example/webhook' };
 
 const testEvent = {
   kind: 'test',
@@ -22,6 +25,11 @@ const testEvent = {
   incident: null,
   at: Date.now(),
 } as Parameters<typeof ntfyType.send>[1];
+
+test('a test event describes the selected channel generically', () => {
+  assert.match(body(testEvent), /notification channel is wired up correctly/);
+  assert.doesNotMatch(body(testEvent), /ntfy/);
+});
 
 test('a successful ntfy send releases the response body', async () => {
   const originalFetch = globalThis.fetch;
@@ -90,6 +98,34 @@ test('an ntfy error response is capped and released', async () => {
 
   try {
     await assert.rejects(() => ntfyType.send(NTFY_CONFIG, testEvent), /ntfy responded 500: x+/);
+    assert.ok(pulls < 10, `read ${pulls} chunks from an unbounded response`);
+    assert.equal(cancelled, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('a Discord error response is capped and released', async () => {
+  const originalFetch = globalThis.fetch;
+  let pulls = 0;
+  let cancelled = false;
+
+  globalThis.fetch = async () =>
+    new Response(
+      new ReadableStream({
+        pull(controller) {
+          pulls++;
+          controller.enqueue(new Uint8Array(1024).fill(120));
+        },
+        cancel() {
+          cancelled = true;
+        },
+      }),
+      { status: 500 },
+    );
+
+  try {
+    await assert.rejects(() => discordType.send(DISCORD_CONFIG, testEvent), /discord responded 500: x+/);
     assert.ok(pulls < 10, `read ${pulls} chunks from an unbounded response`);
     assert.equal(cancelled, true);
   } finally {

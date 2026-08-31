@@ -144,3 +144,19 @@ test('login lockout survives a server restart', async () => {
     await restarted.close();
   }
 });
+
+test('/api/status reports that a session exists, so the dashboard can offer Log out', async () => {
+  const app = await buildServer();
+  after(() => app.close());
+
+  // Unauthenticated it is a 401, as everything under /api/ is.
+  assert.equal((await app.inject({ method: 'GET', url: '/api/status' })).statusCode, 401);
+
+  const res = await app.inject({
+    method: 'GET',
+    url: '/api/status',
+    headers: { authorization: 'Bearer hunter2' },
+  });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json().authRequired, true);
+});

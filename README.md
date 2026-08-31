@@ -801,11 +801,11 @@ reaches nothing" is a mistake, and the two used to look identical.
 
 ### Credentials are write-only
 
-An ntfy token and a Discord webhook URL are both credentials — anyone holding
-the webhook URL can post to the channel. They follow the same rule as monitor
-request headers: the API returns them as `<redacted>`, and sending that
-placeholder back means "leave it as it is", so opening the editor and pressing
-save cannot overwrite a working token with the literal string.
+An ntfy topic, ntfy token, and Discord webhook URL are credentials. On a public
+ntfy server, anyone who learns a topic can subscribe and read host and outage
+details; anyone holding a Discord webhook can post to it. They follow the same
+rule as monitor request headers: the API returns them as `<redacted>`, and
+sending that placeholder back means "leave it as it is".
 
 `GET /api/config/export` withholds them too, unless you ask with
 `?includeSecrets=true`. An export that withheld a credential records which key
@@ -1047,12 +1047,12 @@ clamped value, so a typo is visible immediately rather than three weeks later.
 | `RETENTION_DAYS` | integer | `30` | ≥ 0 | Individual check rows older than this are pruned every 6 hours. `0` disables pruning. Incidents are kept forever |
 | `MONITORS_FILE` | path | *(unset)* | — | Seed file for an empty database. When set but missing, that is reported and nothing is seeded. Falls back to `./monitors.json` when unset |
 
-### ntfy
+### Legacy ntfy bootstrap
 
 | Variable | Type | Default | Bounds | Notes |
 |----------|------|---------|--------|-------|
 | `NTFY_URL` | URL | `https://ntfy.sh` | — | Trailing slashes stripped. Point at your own instance if you self-host |
-| `NTFY_TOPIC` | string | *(empty)* | — | **Required for any notification to be sent.** With it empty the channel reports itself as not configured, every alert is logged and dropped, and the dashboard warns you |
+| `NTFY_TOPIC` | string | *(empty)* | — | Copied into a default channel when the channels migration first runs. Required for a fresh install to start with ntfy configured; inert afterwards |
 | `NTFY_TOKEN` | string | *(empty)* | — | Sent as `Authorization: Bearer …`, for protected topics on a self-hosted ntfy or ntfy.sh Pro |
 | `NTFY_DOWN_PRIORITY` | integer | `5` | 1–5 | Priority for DOWN and STILL DOWN. 5 is urgent and bypasses most phone quiet-hours settings |
 | `NTFY_UP_PRIORITY` | integer | `3` | 1–5 | Priority for RECOVERED and test pushes |
@@ -1203,8 +1203,10 @@ row (with header values redacted) plus live state:
 | `history` | Up to 40 recent checks as `{ ok, latencyMs, checkedAt }`, oldest first |
 | `uptime` | `{ day, week, month }`, each `{ total, up, ratio, avgLatencyMs }` |
 
-The envelope carries `generatedAt` and `notificationsConfigured`, the latter
-being false when `NTFY_TOPIC` is empty.
+The envelope carries `generatedAt`, `notificationsConfigured`, and
+`authRequired`. `notificationsConfigured` is false when no channel is enabled;
+each monitor also carries the names of the enabled channels it currently
+reaches.
 
 This route costs a fixed handful of queries regardless of how many monitors
 exist, rather than roughly six per monitor, because the dashboard polls it
@@ -1212,11 +1214,11 @@ every 10 seconds on a Raspberry Pi.
 
 ### `POST /api/test-notification`
 
-Sends a test push through every configured channel. With a `monitorId` it uses
-that monitor; without one it uses the first monitor; with no monitors at all it
-synthesises a placeholder so a brand-new install can still verify its topic.
-Returns `400` with `No notification channel is configured. Set NTFY_TOPIC.`
-when nothing is configured.
+Sends a test push through the selected monitor's route. With a `monitorId` it
+uses that monitor; with a `channelId` it tests that channel directly, even when
+the channel is switched off. Without a monitor it uses the first one, or a
+placeholder on an empty install. Returns `400` when no channel is configured or
+the selected monitor reaches no enabled channel.
 
 ### Worked examples
 
@@ -1692,16 +1694,16 @@ around this entirely.
 <details>
 <summary>No notifications arrive</summary>
 
-- Press **Test alert** on the dashboard. A `400` saying no channel is configured
-  means `NTFY_TOPIC` is empty.
-- Check the logs for `[notify] ntfy failed:` lines, which carry ntfy's own
-  status code and response.
-- Confirm the phone app is subscribed to exactly the topic you configured;
-  topic names are case-sensitive.
+- Open **Channels** and test the intended destination directly. A `400` saying
+  no channel is configured means one must be added or enabled.
+- Check the logs for `[notify]` failure lines, which include the channel name,
+  type, status code, and a bounded response detail.
+- For ntfy, confirm the phone app is subscribed to exactly the configured
+  topic; topic names are case-sensitive.
 - Remember that nothing fires until an outage has lasted `alertAfterS`. A
   monitor that flaps for 30 seconds with `alertAfterS: 120` is doing exactly
   what it was told to do.
-- For a protected topic, `NTFY_TOKEN` must be set.
+- For a protected ntfy topic, configure its access token on the channel.
 
 </details>
 

@@ -1,6 +1,7 @@
 import { config } from '../config.ts';
 import { headerSafe } from '../format.ts';
 import { body, title } from './message.ts';
+import { errorDetail } from './response.ts';
 import { field } from './schema.ts';
 import type { ChannelTypeDef, NotificationEvent } from './types.ts';
 
@@ -10,46 +11,6 @@ const TAGS: Record<NotificationEvent['kind'], string> = {
   up: 'white_check_mark',
   test: 'wave',
 };
-
-const ERROR_DETAIL_CAP_BYTES = 1024;
-
-/** Read enough of an error response to diagnose it, then release the stream. */
-async function errorDetail(res: Response): Promise<string> {
-  const reader = res.body?.getReader();
-  if (!reader) return '';
-
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  let done = false;
-  try {
-    while (size < ERROR_DETAIL_CAP_BYTES) {
-      const next = await reader.read();
-      done = next.done;
-      if (done) break;
-      if (!next.value) continue;
-
-      // Copy only the bounded prefix. Keeping a subarray would retain the
-      // response's whole backing buffer until the error message is built.
-      const chunk = new Uint8Array(
-        next.value.subarray(0, ERROR_DETAIL_CAP_BYTES - size),
-      );
-      chunks.push(chunk);
-      size += chunk.byteLength;
-      if (chunk.byteLength < next.value.byteLength) break;
-    }
-  } finally {
-    if (!done) await reader.cancel().catch(() => {});
-    reader.releaseLock();
-  }
-
-  const bytes = new Uint8Array(size);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return new TextDecoder().decode(bytes).slice(0, 200);
-}
 
 export const ntfyType: ChannelTypeDef = {
   type: 'ntfy',

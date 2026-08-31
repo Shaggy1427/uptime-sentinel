@@ -3,6 +3,7 @@ import { parseHostPort } from './checks/tcp.ts';
 import { OPERATORS, isOperator } from './checks/assert.ts';
 import { parsePath, PathError } from './checks/jsonpath.ts';
 import { isValidTimezone } from './maintenance.ts';
+import { bodySafe } from './format.ts';
 import { CHANNEL_SCHEMA, CHANNEL_TYPES, isChannelType, REDACTED } from './notify/schema.ts';
 import type {
   ChannelConfig,
@@ -306,7 +307,7 @@ export function validateMaintenance(
 
   let name: string;
   if (has('name')) {
-    name = String(raw.name).trim();
+    name = bodySafe(String(raw.name)).trim();
     if (!name) throw new ValidationError('name is required');
     if (name.length > 120) throw new ValidationError('name must be 120 characters or fewer');
   } else if (current) {
@@ -446,7 +447,9 @@ function validateChannelConfig(
       continue;
     }
 
-    const text = String(value).trim();
+    if (typeof value !== 'string') throw new ValidationError(`${spec.key} must be a string`);
+
+    const text = value.trim();
     if (text === '') {
       if (spec.required) throw new ValidationError(`${spec.key} is required for a ${type} channel`);
       continue;
@@ -465,6 +468,9 @@ function validateChannelConfig(
       // every alert rather than failing once, visibly, here.
       if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
         throw new ValidationError(`${spec.key} must be an http(s) URL`);
+      }
+      if (parsed.username !== '' || parsed.password !== '') {
+        throw new ValidationError(`${spec.key} must not contain embedded credentials`);
       }
       out[spec.key] = text.replace(/\/+$/, '');
       continue;
@@ -487,7 +493,7 @@ export function validateChannel(input: unknown, { partial, current }: ValidateCh
 
   let name: string;
   if (has('name')) {
-    name = String(raw.name).trim();
+    name = bodySafe(String(raw.name)).trim();
     if (!name) throw new ValidationError('name is required');
     if (name.length > 120) throw new ValidationError('name must be 120 characters or fewer');
   } else if (current) {

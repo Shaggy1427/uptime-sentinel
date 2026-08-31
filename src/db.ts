@@ -923,6 +923,12 @@ export function anyChannelEnabled(): boolean {
   return r !== undefined;
 }
 
+/** Whether routing exists at all, including channels deliberately switched off. */
+export function anyChannelConfigured(): boolean {
+  const r = prepared('SELECT 1 FROM channels LIMIT 1').get() as Row | undefined;
+  return r !== undefined;
+}
+
 export function createChannel(input: ChannelInput): NotificationChannel {
   const now = Date.now();
   const info = prepared(

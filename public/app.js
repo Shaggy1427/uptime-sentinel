@@ -80,6 +80,22 @@ function setShown(node, shown) {
   node.classList.toggle('hidden', !shown);
 }
 
+/**
+ * The status in words, for the badge on each card.
+ *
+ * Every state used to be carried by a border tint and a 9px dot, which is
+ * colour alone -- "up", "pending" and "paused" were indistinguishable to
+ * anyone who cannot separate green, amber and grey.
+ */
+const STATUS_LABEL = {
+  up: 'Up',
+  down: 'Down',
+  pending: 'Checking',
+  paused: 'Paused',
+  suppressed: 'Waiting',
+  maintenance: 'Maintenance',
+};
+
 // ------------------------------------------------------------------- render
 
 const SPARK_SLOTS = 40;
@@ -87,6 +103,10 @@ const SPARK_SLOTS = 40;
 /** A fixed row of bars, reused across refreshes so the height transition runs. */
 function sparkline() {
   const wrap = el('div', 'spark');
+  // Forty bars with per-bar tooltips are unusable one at a time, so the row is
+  // hidden and replaced by a single sentence updated alongside it.
+  wrap.setAttribute('aria-hidden', 'true');
+  const summary = el('span', 'sr-only');
   const bars = [];
   for (let i = 0; i < SPARK_SLOTS; i++) {
     const bar = el('i');
@@ -131,7 +151,24 @@ function sparkline() {
     });
   }
 
-  return { node: wrap, update };
+  /** The same information the bars carry, as one readable sentence. */
+  function describe(history) {
+    if (history.length === 0) return 'No checks recorded yet.';
+    const failed = history.filter((h) => !h.ok).length;
+    const shown = history.length;
+    return failed === 0
+      ? `Last ${shown} checks all passed.`
+      : `${failed} of the last ${shown} checks failed.`;
+  }
+
+  return {
+    node: wrap,
+    summary,
+    update(history) {
+      update(history);
+      setText(summary, describe(history));
+    },
+  };
 }
 
 /**
@@ -150,8 +187,13 @@ function monitorCard(monitor) {
   const card = el('article');
   const head = el('div', 'm-head');
   const name = el('span', 'm-name');
+  const state = el('span', 'm-state');
   const type = el('span', 'm-type');
-  head.append(el('span', 'dot'), name, type);
+  // The dot is decorative now that the badge says the state in words; leaving
+  // it exposed would have a screen reader announce an empty span.
+  const dot = el('span', 'dot');
+  dot.setAttribute('aria-hidden', 'true');
+  head.append(dot, name, state, type);
 
   const target = el('div', 'm-target');
   const maintenance = el('div', 'm-maintenance');
@@ -207,7 +249,7 @@ function monitorCard(monitor) {
   };
 
   const edit = el('button', 'tiny ghost', 'Edit');
-  edit.onclick = () => openEditor(current);
+  edit.onclick = () => openEditor(current).catch((err) => banner(err.message, 'err'));
 
   const remove = el('button', 'tiny ghost danger', 'Delete');
   remove.onclick = async () => {
@@ -221,15 +263,21 @@ function monitorCard(monitor) {
   };
 
   actions.append(check, pause, el('span', 'spacer'), edit, remove);
-  card.append(head, target, maintenance, routing, waiting, error, deps, spark.node, stats, actions);
+  card.append(head, target, maintenance, routing, waiting, error, deps, spark.node, spark.summary, stats, actions);
 
   function update(next) {
     current = next;
 
     setClass(card, `card monitor ${next.status}`);
     setText(name, next.name);
+    setText(state, STATUS_LABEL[next.status] ?? next.status);
     setText(type, next.type);
     setText(target, next.target);
+
+    // Names the card as a region, so tabbing or browsing by landmark says
+    // which monitor and what state rather than just "article".
+    const described = `${next.name}, ${STATUS_LABEL[next.status] ?? next.status}`;
+    if (card.getAttribute('aria-label') !== described) card.setAttribute('aria-label', described);
 
     const inMaintenance = next.status === 'maintenance';
     setShown(maintenance, inMaintenance);
@@ -366,7 +414,10 @@ function renderMonitors(monitors) {
   reorder(grid, ordered.map((m) => cards.get(m.id).node));
 }
 
-function renderSummary(monitors, notificationsConfigured) {
+function renderSummary(monitors, notificationsConfigured, authRequired) {
+  // Only offered when a password is actually set: with auth off there is no
+  // session to end, and the button would clear a cookie that means nothing.
+  setShown($('#btn-logout'), authRequired === true);
   const count = (status) => monitors.filter((m) => m.status === status).length;
   const summary = $('#summary');
   summary.replaceChildren();
@@ -520,7 +571,7 @@ function descendantIdsOf(id) {
   return out;
 }
 
-function openEditor(monitor) {
+async function openEditor(monitor) {
   editingId = monitor?.id ?? null;
   const form = $('#editor-form');
   form.reset();
@@ -536,7 +587,9 @@ function openEditor(monitor) {
     form.elements.ignoreTls.checked = monitor.ignoreTls;
   }
   fillParentOptions(monitor);
-  fillChannelOptions(monitor);
+  // Wait for routing before showing the form. Otherwise a fast Save can
+  // mistake "not loaded yet" for "use the defaults" and erase the route.
+  await fillChannelOptions(monitor);
   syncEditorType();
   $('#editor').showModal();
 }
@@ -553,11 +606,9 @@ async function fillChannelOptions(monitor) {
   const hint = $('#channels-hint');
   picker.replaceChildren();
 
-  try {
-    lastChannels = await api('/api/channels');
-  } catch {
-    // Leave whatever was last known; the editor still works without it.
-  }
+  // Failure must keep the editor closed: saving with an empty picker after a
+  // failed read would silently reset an existing monitor to the defaults.
+  lastChannels = await api('/api/channels');
 
   const defaults = lastChannels.filter((c) => c.enabled && c.isDefault).map((c) => c.name);
   hint.textContent =
@@ -572,13 +623,9 @@ async function fillChannelOptions(monitor) {
   }
 
   if (!monitor) return;
-  try {
-    const { channelIds } = await api(`/api/monitors/${monitor.id}/channels`);
-    const chosen = new Set(channelIds.map(String));
-    for (const option of picker.options) option.selected = chosen.has(option.value);
-  } catch {
-    // A monitor deleted from under the dialog; nothing useful to show.
-  }
+  const { channelIds } = await api(`/api/monitors/${monitor.id}/channels`);
+  const chosen = new Set(channelIds.map(String));
+  for (const option of picker.options) option.selected = chosen.has(option.value);
 }
 
 async function saveEditor(event) {
@@ -622,6 +669,12 @@ async function saveEditor(event) {
     const saved = editingId
       ? await api(`/api/monitors/${editingId}`, { method: 'PATCH', body: JSON.stringify(payload) })
       : await api('/api/monitors', { method: 'POST', body: JSON.stringify(payload) });
+    // Routing is a second request. If it fails after creation, retain the new
+    // id so a retry updates that monitor instead of creating a duplicate.
+    if (editingId === null) {
+      editingId = saved.id;
+      $('#editor-title').textContent = `Edit ${saved.name}`;
+    }
     await api(`/api/monitors/${saved.id}/channels`, {
       method: 'PUT',
       body: JSON.stringify({ channelIds }),
@@ -638,8 +691,7 @@ async function saveEditor(event) {
 // ------------------------------------------------------------------- login
 
 function showLogin() {
-  if (timer) clearInterval(timer);
-  timer = null;
+  stopPolling();
   $('#login').classList.remove('hidden');
 }
 
@@ -843,15 +895,33 @@ function setReachable(ok) {
 async function refresh() {
   const [status, incidents] = await Promise.all([api('/api/status'), api('/api/incidents?limit=25')]);
   lastMonitors = status.monitors;
-  renderSummary(status.monitors, status.notificationsConfigured);
+  renderSummary(status.monitors, status.notificationsConfigured, status.authRequired);
   renderMonitors(status.monitors);
   renderIncidents(incidents);
   lastSuccessAt = Date.now();
   setReachable(true);
 }
 
-function start() {
+function stopPolling() {
   if (timer) clearInterval(timer);
+  timer = null;
+}
+
+/**
+ * Whether the dashboard should be polling at all.
+ *
+ * A hidden tab has nobody looking at it, and this runs against a Raspberry Pi:
+ * a forgotten background tab was asking for the full status every ten seconds
+ * indefinitely. Sitting on the login screen is the other case -- every request
+ * would 401 and re-open the overlay that is already open.
+ */
+function shouldPoll() {
+  return document.visibilityState === 'visible' && $('#login').classList.contains('hidden');
+}
+
+function start() {
+  stopPolling();
+  if (!shouldPoll()) return;
   const tick = () =>
     refresh().catch((err) => {
       // A 401 is not a reachability problem; api() has already shown the login
@@ -885,10 +955,13 @@ const CHANNEL_FIELDS = {
   ],
 };
 
+const REDACTED = '<redacted>';
+
 /** Channels as last fetched, so the monitor editor can list them. */
 let lastChannels = [];
+let editingChannelId = null;
 
-function renderChannelFields() {
+function renderChannelFields(channel = null) {
   const host = $('#channel-fields');
   const type = $('#channels-form').elements.type.value;
   host.replaceChildren();
@@ -902,8 +975,11 @@ function renderChannelFields() {
     if (spec.placeholder) input.placeholder = spec.placeholder;
     if (spec.min != null) input.min = String(spec.min);
     if (spec.max != null) input.max = String(spec.max);
-    if (spec.value != null) input.value = String(spec.value);
-    if (spec.required) input.required = true;
+    const stored = channel?.config?.[spec.key];
+    if (stored !== undefined && stored !== REDACTED) input.value = String(stored);
+    else if (stored === REDACTED) input.placeholder = 'Stored; leave blank to keep it';
+    else if (spec.value != null) input.value = String(spec.value);
+    if (spec.required && stored !== REDACTED) input.required = true;
     label.append(input);
     if (spec.secret) label.append(el('small', null, 'Stored write-only; it is never shown again.'));
     host.append(label);
@@ -939,6 +1015,19 @@ function renderChannelsList(channels) {
       }
     };
 
+    const edit = el('button', 'tiny ghost', 'Edit');
+    edit.onclick = () => {
+      editingChannelId = c.id;
+      const form = $('#channels-form');
+      form.reset();
+      form.elements.name.value = c.name;
+      form.elements.type.value = c.type;
+      form.elements.isDefault.checked = c.isDefault;
+      $('#channel-form-title').textContent = `Edit ${c.name}`;
+      $('#channels-save').textContent = 'Save channel';
+      renderChannelFields(c);
+    };
+
     const toggle = el('button', 'tiny ghost', c.enabled ? 'Switch off' : 'Switch on');
     toggle.onclick = async () => {
       try {
@@ -963,15 +1052,23 @@ function renderChannelsList(channels) {
     };
 
     const actions = el('div', 'mw-actions');
-    actions.append(testBtn, toggle, remove);
+    actions.append(testBtn, edit, toggle, remove);
     row.append(text, actions);
     host.append(row);
   }
 }
 
+function resetChannelForm() {
+  editingChannelId = null;
+  $('#channels-form').reset();
+  $('#channel-form-title').textContent = 'Add a channel';
+  $('#channels-save').textContent = 'Add channel';
+  renderChannelFields();
+}
+
 async function openChannels() {
   $('#channels-error').classList.add('hidden');
-  renderChannelFields();
+  resetChannelForm();
   try {
     lastChannels = await api('/api/channels');
     renderChannelsList(lastChannels);
@@ -996,20 +1093,20 @@ async function saveChannel(event) {
   }
 
   try {
-    await api('/api/channels', {
-      method: 'POST',
-      body: JSON.stringify({
-        name: form.elements.name.value.trim(),
-        type,
-        isDefault: form.elements.isDefault.checked,
-        enabled: true,
-        config,
-      }),
+    const payload = {
+      name: form.elements.name.value.trim(),
+      type,
+      isDefault: form.elements.isDefault.checked,
+      config,
+    };
+    const editing = editingChannelId !== null;
+    await api(editing ? `/api/channels/${editingChannelId}` : '/api/channels', {
+      method: editing ? 'PATCH' : 'POST',
+      body: JSON.stringify(editing ? payload : { ...payload, enabled: true }),
     });
-    form.reset();
     await openChannels();
     await refresh();
-    banner('Channel added', 'ok');
+    banner(editing ? 'Channel updated' : 'Channel added', 'ok');
   } catch (err) {
     error.textContent = err.message;
     error.classList.remove('hidden');
@@ -1177,12 +1274,33 @@ async function saveMaintenance(event) {
   }
 }
 
-$('#btn-add').onclick = () => openEditor(null);
+$('#btn-add').onclick = () => openEditor(null).catch((err) => banner(err.message, 'err'));
 $('#editor-cancel').onclick = () => $('#editor').close();
 $('#editor-form').addEventListener('submit', saveEditor);
 $('#editor-form').elements.type.addEventListener('change', syncEditorType);
 $('#editor-form').elements.jsonOperator.addEventListener('change', syncJsonOperator);
 $('#login-form').addEventListener('submit', submitLogin);
+
+$('#btn-logout').onclick = async () => {
+  try {
+    await api('/api/logout', { method: 'POST' });
+  } catch (err) {
+    // The session cookie is HttpOnly, so only reload after the server confirms
+    // that the clearing Set-Cookie reached the browser. Otherwise the page can
+    // appear to log out while leaving the session active.
+    if (err.message !== 'Unauthorized') banner(`Log out failed: ${err.message}`, 'err');
+    return;
+  }
+  stopPolling();
+  location.reload();
+};
+
+// Stop polling a tab nobody is looking at, and catch up on return rather than
+// showing whatever was on screen when it was hidden.
+document.addEventListener('visibilitychange', () => {
+  if (shouldPoll()) start();
+  else stopPolling();
+});
 
 $('#btn-export').onclick = () => {
   $('#export-form').reset();
@@ -1194,7 +1312,7 @@ $('#export-form').addEventListener('submit', doExport);
 $('#btn-channels').onclick = () => openChannels().catch((err) => banner(err.message, 'err'));
 $('#channels-cancel').onclick = () => $('#channels').close();
 $('#channels-form').addEventListener('submit', saveChannel);
-$('#channels-form').elements.type.addEventListener('change', renderChannelFields);
+$('#channels-form').elements.type.addEventListener('change', () => renderChannelFields());
 
 $('#btn-maintenance').onclick = () => openMaintenance().catch((err) => banner(err.message, 'err'));
 $('#maintenance-cancel').onclick = () => $('#maintenance').close();
@@ -1216,7 +1334,7 @@ $('#btn-test').onclick = async () => {
     const res = await api('/api/test-notification', { method: 'POST', body: JSON.stringify({}) });
     const failed = res.results.filter((r) => !r.ok);
     if (failed.length) banner(`Test failed: ${failed.map((r) => `${r.channel}: ${r.error}`).join('; ')}`, 'err');
-    else banner('Test notification sent to ntfy.', 'ok');
+    else banner('Test notification sent.', 'ok');
   } catch (err) {
     banner(err.message, 'err');
   } finally {

@@ -12,7 +12,7 @@ import { dispatch } from './notify/index.ts';
 import { validateChannel, validateMaintenance, validateMonitor, ValidationError } from './validate.ts';
 import type { ValidateOptions } from './validate.ts';
 import { openRule } from './maintenance.ts';
-import { REDACTED, secretKeys } from './notify/schema.ts';
+import { isChannelType, REDACTED, secretKeys } from './notify/schema.ts';
 import { cookieSecret, passwordMatches } from './secret.ts';
 import { renderMetrics } from './metrics.ts';
 import { exportConfig, importConfig } from './config-io.ts';
@@ -50,7 +50,11 @@ function redact(monitor: Monitor) {
  */
 function redactChannel(channel: NotificationChannel) {
   const config: Record<string, string | number> = { ...channel.config };
-  for (const key of secretKeys(channel.type)) {
+  // A row from a newer build may have an unknown type after a downgrade. Its
+  // schema is unavailable, so conservatively hide every value rather than
+  // crashing the whole endpoint or guessing which fields are credentials.
+  const secrets = isChannelType(channel.type) ? secretKeys(channel.type) : Object.keys(config);
+  for (const key of secrets) {
     if (config[key] !== undefined && config[key] !== '') config[key] = REDACTED;
   }
   return { ...channel, config };
@@ -487,6 +491,11 @@ export async function buildServer() {
       // Any enabled channel at all. Whether a *particular* monitor reaches one
       // is per-monitor now, and rides along as `channels` on each entry.
       notificationsConfigured: store.anyChannelEnabled(),
+      // So the dashboard can offer Log out. /api/auth was removed, which
+      // left the UI with no way to know a password is set -- and a button
+      // that never appears is the same as not having one. Not sensitive:
+      // reaching this route already requires auth when auth is on.
+      authRequired: config.authPassword !== '',
       monitors: monitors.map((m) => describe(m, ctx)),
     };
   });
@@ -691,6 +700,12 @@ export async function buildServer() {
 
   app.post('/api/test-notification', async (req, reply) => {
     const { monitorId, channelId } = (req.body ?? {}) as { monitorId?: unknown; channelId?: unknown };
+    if (
+      monitorId !== undefined &&
+      (typeof monitorId !== 'number' || !Number.isSafeInteger(monitorId) || monitorId <= 0)
+    ) {
+      return reply.code(400).send({ error: 'monitorId must be a positive integer' });
+    }
     const wantId =
       typeof monitorId === 'number' && Number.isSafeInteger(monitorId) && monitorId > 0 ? monitorId : null;
     const monitor = wantId !== null ? store.getMonitor(wantId) : store.listMonitors()[0];
@@ -725,6 +740,12 @@ export async function buildServer() {
     // Testing one channel is the point of the button once there is more than
     // one: "is this new Discord webhook right" is a different question from
     // "does anything work at all".
+    if (
+      channelId !== undefined &&
+      (typeof channelId !== 'number' || !Number.isSafeInteger(channelId) || channelId <= 0)
+    ) {
+      return reply.code(400).send({ error: 'channelId must be a positive integer' });
+    }
     const wantChannel =
       typeof channelId === 'number' && Number.isSafeInteger(channelId) && channelId > 0 ? channelId : null;
 
@@ -747,7 +768,7 @@ export async function buildServer() {
       reason: null,
       downForMs: null,
       at: Date.now(),
-    }, targets, store.anyChannelEnabled());
+    }, targets, store.anyChannelConfigured());
 
     if (outcome.results.length === 0) {
       // Two different problems, two different answers -- telling someone to

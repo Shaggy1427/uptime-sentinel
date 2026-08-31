@@ -58,6 +58,10 @@ test('monitor CRUD round-trips through the API', async () => {
   const status = await app.inject({ method: 'GET', url: '/api/status' });
   assert.equal(status.json().monitors[0].status, 'paused');
   assert.equal(status.json().notificationsConfigured, false);
+  // This file runs with AUTH_PASSWORD empty. The dashboard reads this to decide
+  // whether to offer Log out; /api/auth was removed, so without it the button
+  // could never know whether there was a session to end.
+  assert.equal(status.json().authRequired, false);
 
   const deleted = await app.inject({ method: 'DELETE', url: `/api/monitors/${id}` });
   assert.equal(deleted.statusCode, 204);

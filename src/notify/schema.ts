@@ -34,7 +34,9 @@ export const CHANNEL_TYPES: readonly ChannelType[] = ['ntfy', 'discord'];
 export const CHANNEL_SCHEMA: Record<ChannelType, readonly FieldSpec[]> = {
   ntfy: [
     { key: 'url', label: 'Server', kind: 'url', required: false, secret: false, fallback: 'https://ntfy.sh' },
-    { key: 'topic', label: 'Topic', kind: 'string', required: true, secret: false, hint: 'The topic your phone is subscribed to.' },
+    // Public ntfy topics are capability credentials: anyone who learns the
+    // name can subscribe and read host/outage details (see SECURITY.md).
+    { key: 'topic', label: 'Topic', kind: 'string', required: true, secret: true, hint: 'The topic your phone is subscribed to.' },
     { key: 'token', label: 'Access token', kind: 'string', required: false, secret: true, hint: 'Only needed on a protected server.' },
     { key: 'downPriority', label: 'Priority for DOWN', kind: 'int', required: false, secret: false, fallback: 5, min: 1, max: 5 },
     { key: 'upPriority', label: 'Priority for RECOVERED', kind: 'int', required: false, secret: false, fallback: 3, min: 1, max: 5 },

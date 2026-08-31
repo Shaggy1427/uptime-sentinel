@@ -394,6 +394,22 @@ test('a monitor routed nowhere still resolves its incident rather than stranding
   assert.equal(store.openIncidentFor(monitorId), null);
 });
 
+test('a delivered DOWN keeps retrying RECOVERED while its route is disabled', async () => {
+  const channel = makeChannel({ name: 'phone', isDefault: true });
+  await scheduler.runNow(monitorId);
+  assert.notEqual(store.openIncidentFor(monitorId)?.alertedAt, null, 'DOWN was delivered');
+
+  store.updateChannel(channel.id, { ...channel, enabled: false });
+  mode = 200;
+  await scheduler.runNow(monitorId);
+  assert.notEqual(store.openIncidentFor(monitorId), null, 'the undelivered recovery must remain retryable');
+
+  store.updateChannel(channel.id, { ...channel, enabled: true });
+  await scheduler.runNow(monitorId);
+  assert.equal(store.openIncidentFor(monitorId), null, 'the incident closes after RECOVERED is delivered');
+  assert.match(received.at(-1)!.title, /^RECOVERED:/);
+});
+
 // ------------------------------------------------------------ validation
 
 test('validateChannel enforces each type’s own required fields', () => {
@@ -414,7 +430,9 @@ test('validateChannel rejects values that would only fail later, at send time', 
   const bad: [unknown, RegExp][] = [
     [{ name: 'x', type: 'discord', config: { webhookUrl: 'not a url' } }, /must be a valid URL/],
     [{ name: 'x', type: 'discord', config: { webhookUrl: 'ftp://host/hook' } }, /must be an http\(s\) URL/],
+    [{ name: 'x', type: 'discord', config: { webhookUrl: 'https://user:pass@host/hook' } }, /embedded credentials/],
     [{ name: 'x', type: 'ntfy', config: { topic: 't', url: 'javascript:alert(1)' } }, /must be an http\(s\) URL/],
+    [{ name: 'x', type: 'ntfy', config: { topic: { nested: true } } }, /topic must be a string/],
     [{ name: 'x', type: 'ntfy', config: { topic: 't', downPriority: 9 } }, /downPriority/],
     [{ name: 'x', type: 'ntfy', config: { topic: 't', upPriority: 0 } }, /upPriority/],
     [{ name: 'x', type: 'ntfy', config: 'nope' }, /config must be an object/],
@@ -423,6 +441,14 @@ test('validateChannel rejects values that would only fail later, at send time', 
   for (const [body, pattern] of bad) {
     assert.throws(() => validateChannel(body, { partial: false }), pattern, JSON.stringify(body));
   }
+});
+
+test('channel names cannot inject terminal controls into notification logs', () => {
+  const out = validateChannel(
+    { name: 'phone\n\x1B[31m', type: 'ntfy', config: { topic: 't' } },
+    { partial: false },
+  );
+  assert.equal(out.name, 'phone[31m');
 });
 
 test('unknown config keys are dropped rather than stored forever', () => {
@@ -472,8 +498,24 @@ test('every secret key the schema declares is withheld by the API', async () => 
   // The declaration is the source of truth, so this catches a new type that
   // forgets to mark its credential.
   assert.ok(secretKeys('ntfy').includes('token'));
+  assert.ok(secretKeys('ntfy').includes('topic'), 'a public ntfy topic is a capability credential');
   assert.ok(secretKeys('discord').includes('webhookUrl'));
-  assert.ok(CHANNEL_SCHEMA.ntfy.some((f) => f.key === 'topic' && !f.secret), 'a topic is not a secret');
+});
+
+test('an unknown channel type cannot break the API or expose its config after a downgrade', async () => {
+  const app = await buildServer();
+  after(() => app.close());
+
+  store.db.prepare(
+    `INSERT INTO channels (name, type, config, enabled, is_default, created_at, updated_at)
+     VALUES (?, ?, ?, 1, 0, 0, 0)`,
+  ).run('future', 'carrier-pigeon', JSON.stringify({ endpoint: 'TOPSECRET' }));
+
+  const response = await app.inject({ method: 'GET', url: '/api/channels' });
+  assert.equal(response.statusCode, 200);
+  const future = response.json().find((channel: { name: string }) => channel.name === 'future');
+  assert.equal(future.config.endpoint, REDACTED);
+  assert.equal(JSON.stringify(exportConfig()).includes('TOPSECRET'), false);
 });
 
 test('saving a redacted secret back leaves the stored credential alone', async () => {
@@ -528,7 +570,8 @@ test('the channels API creates, reads, patches and deletes', async () => {
     payload: { enabled: false },
   });
   assert.equal(patched.json().enabled, false);
-  assert.equal(patched.json().config.topic, 'phone', 'the untouched config survived');
+  assert.equal(patched.json().config.topic, REDACTED, 'the credential remains write-only');
+  assert.equal(store.getChannel(channel.id)!.config.topic, 'phone', 'the untouched config survived');
 
   assert.equal((await app.inject({ method: 'DELETE', url: `/api/channels/${channel.id}` })).statusCode, 204);
   assert.equal((await app.inject({ method: 'GET', url: '/api/channels' })).json().length, 0);
@@ -643,6 +686,13 @@ test('test-notification can target one channel, and says which problem it hit', 
       .statusCode,
     404,
   );
+  for (const payload of [{ channelId: '1' }, { channelId: 0 }, { monitorId: '1' }, { monitorId: -1 }]) {
+    assert.equal(
+      (await app.inject({ method: 'POST', url: '/api/test-notification', payload })).statusCode,
+      400,
+      JSON.stringify(payload),
+    );
+  }
 });
 
 // ------------------------------------------------------- export and import
@@ -654,10 +704,10 @@ test('channels and routing survive an export and import, credentials withheld', 
 
   const file = exportConfig();
   assert.equal(file.channels?.length, 2);
-  assert.equal(JSON.stringify(file).includes('KEEPSECRET'), false, 'the ordinary export withholds tokens');
+  assert.equal(JSON.stringify(file).includes('KEEPSECRET'), false, 'the ordinary export withholds credentials');
   const exportedLoud = file.channels!.find((c) => c.name === 'Loud')!;
-  assert.deepEqual(exportedLoud.configRedacted, ['token'], 'and says which key it withheld');
-  assert.equal(exportedLoud.config.topic, 'loud', 'non-secret settings do travel');
+  assert.deepEqual(exportedLoud.configRedacted, ['topic', 'token'], 'and says which keys it withheld');
+  assert.equal(exportedLoud.config.topic, undefined, 'the capability topic does not travel');
   assert.deepEqual(file.monitors[0]!.channels, ['Loud'], 'routing recorded by name');
 
   // Re-importing the same file must not lose the credential it withheld.
@@ -686,16 +736,59 @@ test('includeSecrets exports the credentials, and importing them elsewhere works
   assert.equal(store.listChannels()[0]!.config.token, 'CARRIED');
 });
 
-test('importing a redacted channel into a fresh install reports the missing credential', () => {
+test('importing a redacted channel into a fresh install refuses an unusable destination', () => {
   makeChannel({ name: 'Loud', config: { ...ntfyConfig('loud'), token: 'GONE' } });
   const file = exportConfig();
 
   for (const c of store.listChannels()) store.deleteChannel(c.id);
   const report = importConfig(file);
 
-  assert.deepEqual(report.channelsCreated, ['Loud']);
-  assert.deepEqual(report.channelsNeedCredentials, ['Loud'], 'told, rather than left to wonder');
-  assert.equal(store.listChannels()[0]!.config.token, undefined);
+  assert.match(report.errors.join(' '), /topic was redacted/);
+  assert.deepEqual(report.channelsCreated, []);
+  assert.equal(store.listChannels().length, 0);
+});
+
+test('a redacted Discord export preserves an existing webhook and refuses an unrestorable one', () => {
+  const channel = makeChannel({ name: 'Chat', type: 'discord', config: discordConfig() });
+  const file = exportConfig();
+
+  const existing = importConfig(file);
+  assert.deepEqual(existing.errors, []);
+  assert.equal(store.getChannel(channel.id)!.config.webhookUrl, discordConfig().webhookUrl);
+
+  store.deleteChannel(channel.id);
+  const fresh = importConfig(file);
+  assert.match(fresh.errors.join(' '), /webhookUrl was redacted/);
+  assert.equal(store.listChannels().some((candidate) => candidate.name === 'Chat'), false);
+});
+
+test('duplicate channel names in one import are rejected before writing', () => {
+  const report = importConfig({
+    version: 1,
+    exportedAt: Date.now(),
+    monitors: [],
+    channels: [
+      { name: 'Phone', type: 'ntfy', config: { topic: 'one' }, enabled: true, isDefault: true },
+      { name: 'phone', type: 'ntfy', config: { topic: 'two' }, enabled: true, isDefault: false },
+    ],
+  });
+
+  assert.match(report.errors.join(' '), /already has a channel named/);
+  assert.equal(store.listChannels().length, 0);
+});
+
+test('an explicit null route resets a monitor to the defaults', () => {
+  const chosen = makeChannel({ name: 'Chosen' });
+  makeChannel({ name: 'Default', isDefault: true });
+  store.setMonitorChannels(monitorId, [chosen.id]);
+
+  const file = exportConfig();
+  file.monitors[0]!.channels = null;
+  const report = importConfig(file);
+
+  assert.deepEqual(report.errors, []);
+  assert.deepEqual(store.monitorChannelIds(monitorId), []);
+  assert.deepEqual(store.channelsFor(monitorId).map((channel) => channel.name), ['Default']);
 });
 
 test('an import naming a channel that does not exist is refused, not trimmed', () => {

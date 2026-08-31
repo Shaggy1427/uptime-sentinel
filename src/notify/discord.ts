@@ -1,4 +1,5 @@
 import { body, title } from './message.ts';
+import { errorDetail } from './response.ts';
 import { field } from './schema.ts';
 import type { ChannelTypeDef, NotificationEvent } from './types.ts';
 
@@ -48,10 +49,7 @@ export const discordType: ChannelTypeDef = {
       // Discord answers a bad webhook with JSON explaining why, and that
       // message is the whole diagnosis ("Unknown Webhook" means deleted, not
       // unreachable). Read a bounded prefix rather than the whole body.
-      const detail = await res
-        .text()
-        .then((t) => t.slice(0, 200))
-        .catch(() => '');
+      const detail = await errorDetail(res).catch(() => '');
       throw new Error(`discord responded ${res.status}: ${detail}`);
     }
 

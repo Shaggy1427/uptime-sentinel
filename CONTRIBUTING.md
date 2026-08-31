@@ -285,7 +285,7 @@ sources directly.
 
 ### Current coverage
 
-Twelve files, 124 tests:
+The suite is organised by behaviour:
 
 | File | Covers |
 |------|--------|
@@ -299,6 +299,9 @@ Twelve files, 124 tests:
 | `test/json-monitor.test.ts` | Path parsing, all ten operators, `[*]` semantics |
 | `test/redirect.test.ts` | Unfollowed 3xx handling and accepted-status opt-in |
 | `test/config-io.test.ts` | Export redaction, import merge, dry-run rollback, error reporting |
+| `test/channels.test.ts` | Channel CRUD, routing, delivery, migration, redaction, import/export |
+| `test/maintenance.test.ts` | Window schedules, suppression, API, metrics, import/export |
+| `test/notify.test.ts` | Message safety, response caps, and stream release |
 | `test/seed.test.ts` | Seeding an empty database, both file formats, parent resolution |
 | `test/units.test.ts` | `parseAcceptedStatus`, `parseHostPort`, `formatDuration`, `headerSafe` |
 
@@ -311,7 +314,7 @@ thing that matters here. The standard is behavioural:
 |--------|----------|
 | A bug fix | A test that fails before your fix and passes after. Non-negotiable — every `fix/` commit in this history has one |
 | A new monitor type | A test file covering a pass, a failure, and at least one malformed target |
-| A new notification channel | A test that `enabled()` is false when unconfigured, and that a throwing `send()` does not escape `dispatch` |
+| A new notification channel type | Validation tests plus successful and failed sends proving `dispatch` never throws |
 | A new API route or parameter | A test per status code the route can return, including its 400s |
 | A validation rule | Both sides: the value that is now accepted and the one that is now rejected |
 | A migration | A test that exercises the new column through the API, so the mapper and `UPDATABLE` are both proven |
@@ -442,20 +445,17 @@ Reuse `src/checks/request.ts` if it speaks HTTP: it owns the 2 MB body cap, the
 TLS-ignoring dispatcher, the manual-redirect policy and the error translation,
 and a second copy of any of those would drift.
 
-### Adding a notification channel
+### Adding a notification channel type
 
-1. Create `src/notify/yourchannel.ts` exporting a `Channel`
-   (`{ name, enabled(), send() }`).
-2. `enabled()` returns false when it is not configured, so it is skipped
-   silently rather than erroring.
-3. `send()` throws on failure. The dispatcher logs it and carries on — **a
-   broken notifier must never stop monitoring.**
-4. Add it to the `channels` array in `src/notify/index.ts`.
-5. Add its configuration to `src/config.ts` and `.env.example`, and to the
-   README's [Environment variables](README.md#environment-variables) tables.
-6. Handle all four `NotificationKind` values: `down`, `still-down`, `up`,
-   `test`.
-7. Add a test.
+1. Create `src/notify/yourtype.ts` exporting a `ChannelTypeDef`; its
+   `send(config, event)` receives settings from a stored channel row.
+2. Add the type to `src/notify/registry.ts` and declare its fields in
+   `src/notify/schema.ts`. Mark every capability or credential `secret: true`.
+3. Use the shared `title()` and `body()` builders. `send()` may throw;
+   `dispatch()` must catch the failure so monitoring continues.
+4. Mirror the fields in the dashboard channel editor and document the type.
+5. Test validation, success, bounded failure responses, secret redaction, and
+   all four event kinds: `down`, `still-down`, `up`, and `test`.
 
 ### Adding a configuration variable
 

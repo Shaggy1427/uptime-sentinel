@@ -14,7 +14,7 @@ import {
   pruneChecks,
   resolveIncident,
   rulesCovering,
-  anyChannelEnabled,
+  anyChannelConfigured,
   channelsFor,
   db,
 } from './db.ts';
@@ -285,7 +285,7 @@ export class Scheduler {
    * resolve channels identically instead of each growing their own rule.
    */
   private async notify(event: NotificationEvent): Promise<DispatchOutcome> {
-    return dispatch(event, channelsFor(event.monitor.id), anyChannelEnabled());
+    return dispatch(event, channelsFor(event.monitor.id), anyChannelConfigured());
   }
 
   /**
@@ -516,11 +516,10 @@ export class Scheduler {
     // leave it open so the next successful check retries -- otherwise a
     // transient ntfy outage leaves the operator's last signal reading "DOWN"
     // for a service that is fine, with no reminder to correct it.
-    // An empty result closes the incident whichever reason produced it. A
-    // monitor routed nowhere is a misconfiguration -- dispatch has already
-    // said so in the log -- but refusing to resolve would strand the incident
-    // open forever, since nothing is ever going to deliver it.
-    if (outcome.results.length === 0 || outcome.results.some((r) => r.ok)) {
+    // With no configured destination there is nothing to retry. A routing
+    // mistake is different: it may be repaired or a disabled channel may be
+    // re-enabled, so keep the incident open until RECOVERED is delivered.
+    if (outcome.reason === 'none-configured' || outcome.results.some((r) => r.ok)) {
       resolveIncident(incident.id, now);
     } else {
       console.warn(

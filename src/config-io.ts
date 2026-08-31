@@ -1,6 +1,6 @@
 import * as store from './db.ts';
 import { validateChannel, validateMaintenance, validateMonitor, ValidationError } from './validate.ts';
-import { secretKeys } from './notify/schema.ts';
+import { CHANNEL_SCHEMA, isChannelType, secretKeys } from './notify/schema.ts';
 import type {
   ChannelInput,
   MaintenanceInput,
@@ -192,7 +192,9 @@ function toExportedMaintenance(window: MaintenanceWindow, nameById: Map<number, 
 }
 
 function toExportedChannel(channel: NotificationChannel, includeSecrets: boolean): ExportedChannel {
-  const secrets = secretKeys(channel.type);
+  // A downgrade can leave rows whose type this build does not know. Without a
+  // schema, every value is treated as secret in an ordinary export.
+  const secrets = isChannelType(channel.type) ? secretKeys(channel.type) : Object.keys(channel.config);
   const config: Record<string, string | number> = {};
   const withheld: string[] = [];
 
@@ -259,8 +261,8 @@ interface Prepared {
   input: Partial<MonitorInput>;
   parent: string | null;
   redactedHeaderNames: string[];
-  /** Channel names this monitor routes to; null means "use the defaults". */
-  channels: string[] | null;
+  /** Undefined means no opinion; null means explicitly use the defaults. */
+  channels: string[] | null | undefined;
 }
 
 function groupByName(monitors: Monitor[]): Map<string, Monitor[]> {
@@ -345,8 +347,10 @@ function prepare(entries: unknown[], errors: string[]): Prepared[] {
     }
     seenNames.set(key, position);
 
-    let routedTo: string[] | null = null;
-    if (channels !== undefined && channels !== null) {
+    let routedTo: string[] | null | undefined;
+    if (channels === null) {
+      routedTo = null;
+    } else if (channels !== undefined) {
       if (!Array.isArray(channels) || channels.some((c) => typeof c !== 'string')) {
         errors.push(`${label(fields.name)}: "channels" must be an array of channel names`);
         return;
@@ -643,6 +647,14 @@ function channelEntriesOf(payload: unknown): unknown[] {
 
 function prepareChannels(entries: unknown[], errors: string[]): PreparedChannel[] {
   const prepared: PreparedChannel[] = [];
+  const seenNames = new Map<string, number>();
+  const existingByName = new Map<string, NotificationChannel[]>();
+  for (const channel of store.listChannels()) {
+    const key = channel.name.toLowerCase();
+    const list = existingByName.get(key);
+    if (list) list.push(channel);
+    else existingByName.set(key, [channel]);
+  }
 
   entries.forEach((entry, i) => {
     const position = i + 1;
@@ -656,14 +668,62 @@ function prepareChannels(entries: unknown[], errors: string[]): PreparedChannel[
       return;
     }
 
-    const { configRedacted, ...fields } = entry as Record<string, unknown>;
-    const withheld = Array.isArray(configRedacted)
-      ? configRedacted.filter((k): k is string => typeof k === 'string')
-      : [];
+    const { configRedacted, ...rawFields } = entry as Record<string, unknown>;
+    const fields = { ...rawFields };
+    const name = String(fields.name ?? '').trim();
+    const key = name.toLowerCase();
+    const firstSeen = seenNames.get(key);
+    if (key !== '' && firstSeen !== undefined) {
+      errors.push(`${label(name)}: the file already has a channel named "${name}" at entry ${firstSeen}`);
+      return;
+    }
+    if (key !== '') seenNames.set(key, position);
+
+    if (
+      configRedacted !== undefined &&
+      (!Array.isArray(configRedacted) || configRedacted.some((k) => typeof k !== 'string'))
+    ) {
+      errors.push(`${label(fields.name)}: "configRedacted" must be an array of secret key names`);
+      return;
+    }
+    const withheld = (configRedacted ?? []) as string[];
+
+    if (typeof fields.type === 'string' && isChannelType(fields.type)) {
+      const type = fields.type;
+      const allowedSecrets = new Set(secretKeys(type));
+      const invalid = withheld.find((secret) => !allowedSecrets.has(secret));
+      if (invalid !== undefined) {
+        errors.push(`${label(fields.name)}: "${invalid}" is not a secret field for a ${type} channel`);
+        return;
+      }
+
+      const matches = existingByName.get(key) ?? [];
+      const target = matches.length === 1 && matches[0]!.type === type ? matches[0] : undefined;
+      if (fields.config === undefined || (typeof fields.config === 'object' && fields.config !== null && !Array.isArray(fields.config))) {
+        const config = { ...((fields.config ?? {}) as Record<string, unknown>) };
+        for (const secret of withheld) {
+          const stored = target?.config[secret];
+          if (stored !== undefined) config[secret] = stored;
+        }
+        fields.config = config;
+      }
+
+      const missingRequired = withheld.find(
+        (secret) =>
+          CHANNEL_SCHEMA[type].some((spec) => spec.key === secret && spec.required) &&
+          (fields.config as Record<string, unknown> | undefined)?.[secret] === undefined,
+      );
+      if (missingRequired !== undefined) {
+        errors.push(
+          `${label(fields.name)}: ${missingRequired} was redacted; import a secrets-inclusive export or configure this channel first`,
+        );
+        return;
+      }
+    }
 
     try {
       prepared.push({
-        name: String(fields.name ?? '').trim(),
+        name,
         input: validateChannel(fields, { partial: false }),
         withheld,
       });
@@ -749,14 +809,14 @@ function applyRouting(
   for (const entry of prepared) {
     // Absent means the file says nothing about routing, which must leave any
     // existing assignment alone rather than resetting it to the defaults.
-    if (entry.channels === null) continue;
+    if (entry.channels === undefined) continue;
 
     const monitorId = monitorIdByName.get(entry.name.toLowerCase());
     if (monitorId === undefined) continue;
 
     const ids: number[] = [];
     let missing: string | null = null;
-    for (const name of entry.channels) {
+    for (const name of entry.channels ?? []) {
       const id = channelIdByName.get(name.toLowerCase());
       if (id === undefined) {
         missing = name;
