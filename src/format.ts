@@ -19,15 +19,13 @@ export function headerSafe(value: string): string {
 }
 
 /**
- * Strip control characters that have no place in a text/plain notification
- * body, while preserving tab, LF and CR (so multi-line bodies still work).
+ * Strip control characters from an untrusted value before embedding it in a
+ * multi-line text/plain notification body. Tabs are harmless and preserved;
+ * structural line breaks are added by the caller after each field is cleaned.
  *
- * C0 (0x00-0x1F) minus \t \n \r, DEL (0x7F), and C1 (0x80-0x9F). Anything
- * outside that range is printable Unicode and is left alone. Used to defend
- * the ntfy body against a stored monitor name that smuggles a fake log
- * line, fake status banner, or terminal-escape sequence into the
- * notification.
+ * C0 (0x00-0x1F) minus TAB, DEL (0x7F), and C1 (0x80-0x9F) are removed.
+ * Anything outside that range is printable Unicode and is left alone.
  */
 export function bodySafe(value: string): string {
-  return value.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, '');
+  return value.replace(/[\x00-\x08\x0A-\x1F\x7F-\x9F]/g, '');
 }

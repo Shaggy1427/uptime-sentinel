@@ -42,6 +42,30 @@ test('a successful ntfy send releases the response body', async () => {
   }
 });
 
+test('an ntfy body strips injected line and terminal controls', async () => {
+  const originalFetch = globalThis.fetch;
+  let sentBody: BodyInit | null | undefined;
+
+  globalThis.fetch = async (_input, init) => {
+    sentBody = init?.body;
+    return new Response(null, { status: 200 });
+  };
+
+  try {
+    await ntfyChannel.send({
+      ...testEvent,
+      kind: 'down',
+      reason: 'failed\n[FAKE]\r\x1B[31m',
+      downForMs: 1000,
+    });
+    assert.equal(typeof sentBody, 'string');
+    assert.match(sentBody, /Down for 1s\.\nError: failed\[FAKE\]\[31m/);
+    assert.doesNotMatch(sentBody, /[\r\x1B]/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('an ntfy error response is capped and released', async () => {
   const originalFetch = globalThis.fetch;
   let pulls = 0;

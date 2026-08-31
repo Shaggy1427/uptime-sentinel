@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseAcceptedStatus } from '../src/checks/status.ts';
 import { parseHostPort } from '../src/checks/tcp.ts';
-import { formatDuration, headerSafe } from '../src/format.ts';
+import { bodySafe, formatDuration, headerSafe } from '../src/format.ts';
 import { validateMonitor, ValidationError } from '../src/validate.ts';
 
 test('passwordMatches is constant-time against the configured password', async () => {
@@ -225,14 +225,17 @@ test('validateMonitor strips control characters from monitor names', () => {
   const del = validateMonitor({ ...base, name: '  hi\u007F  ' }, { partial: false });
   assert.equal(del.name, 'hi');
 
+  // Controls at the boundary cannot shield ordinary whitespace from trim.
+  const boundary = validateMonitor({ ...base, name: '\x00  tidy  \x00' }, { partial: false });
+  assert.equal(boundary.name, 'tidy');
+
   // Non-ASCII letters (e.g. accented Latin) are preserved.
   const unicode = validateMonitor({ ...base, name: 'café' }, { partial: false });
   assert.equal(unicode.name, 'café');
 });
 
-test('bodySafe keeps newlines and tabs, strips the rest', async () => {
-  const { bodySafe } = await import('../src/format.ts');
-  assert.equal(bodySafe('a\nb\tc'), 'a\nb\tc', 'LF and TAB are preserved');
+test('bodySafe strips line controls and preserves tabs and Unicode', () => {
+  assert.equal(bodySafe('a\nb\rc\td'), 'abc\td', 'LF and CR are stripped; TAB is preserved');
   assert.equal(bodySafe('a\x00b\x01c'), 'abc', 'C0 controls are stripped');
   assert.equal(bodySafe('a\u0080b\u009Fc'), 'abc', 'C1 controls are stripped');
   assert.equal(bodySafe('a\x7Fb'), 'ab', 'DEL is stripped');
