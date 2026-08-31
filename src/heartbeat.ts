@@ -42,6 +42,7 @@ const IDLE_GRACE_MS = 60_000;
  */
 export class Heartbeat {
   private timer: NodeJS.Timeout | null = null;
+  private inFlight = false;
   private startedAt: number;
   private lastPingOk: boolean | null = null;
   private readonly now: () => number;
@@ -99,14 +100,22 @@ export class Heartbeat {
   }
 
   async tick(): Promise<void> {
-    const withheld = this.withholdReason();
-    if (withheld) {
-      console.warn(`[heartbeat] withholding ping: ${withheld}`);
-      this.lastPingOk = false;
-      return;
-    }
+    // setInterval does not wait for an async callback. If an endpoint takes
+    // longer than the interval, starting another request on every tick creates
+    // a growing overlap (up to timeout / interval requests) and lets an older
+    // completion overwrite the status of a newer one. One heartbeat in flight
+    // is enough; a slow ping is already the signal the external service needs.
+    if (this.inFlight) return;
+    this.inFlight = true;
 
     try {
+      const withheld = this.withholdReason();
+      if (withheld) {
+        console.warn(`[heartbeat] withholding ping: ${withheld}`);
+        this.lastPingOk = false;
+        return;
+      }
+
       const res = await fetch(this.options.url, {
         method: this.options.method,
         signal: AbortSignal.timeout(this.options.timeoutMs),
@@ -121,6 +130,8 @@ export class Heartbeat {
       // service noticing the gap is the entire point.
       console.error(`[heartbeat] ping failed: ${(err as Error).message}`);
       this.lastPingOk = false;
+    } finally {
+      this.inFlight = false;
     }
   }
 
