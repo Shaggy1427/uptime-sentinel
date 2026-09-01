@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # ---------- build ----------
-FROM node:24-bookworm-slim AS build
+FROM node:26-bookworm-slim AS build
 WORKDIR /app
 
 COPY package*.json ./
@@ -15,7 +15,7 @@ RUN npm run build
 RUN npm ci --omit=dev && npm cache clean --force
 
 # ---------- runtime ----------
-FROM node:24-bookworm-slim AS runtime
+FROM node:26-bookworm-slim AS runtime
 WORKDIR /app
 
 # iputils-ping provides the `ping` binary used by ICMP monitors.
