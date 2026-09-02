@@ -189,7 +189,7 @@ const bool = (v: boolean) => (v ? 1 : 0);
 // ------------------------------------------------------------------ monitors
 
 export function listMonitors(): Monitor[] {
-  return (db.prepare('SELECT * FROM monitors ORDER BY name COLLATE NOCASE').all() as Row[]).map(toMonitor);
+  return (db.prepare('SELECT * FROM monitors ORDER BY name COLLATE NOCASE, id').all() as Row[]).map(toMonitor);
 }
 
 export function getMonitor(id: number): Monitor | null {
@@ -202,10 +202,11 @@ export function getMonitor(id: number): Monitor | null {
  *
  * The test-notification fallback only needs one row; listMonitors()[0]
  * mapped every monitor in the database (headers JSON.parse included) to
- * reach it.
+ * reach it. The `, id` tiebreaker matches listMonitors so the two agree
+ * when names collide case-insensitively.
  */
 export function firstMonitor(): Monitor | null {
-  const r = db.prepare('SELECT * FROM monitors ORDER BY name COLLATE NOCASE LIMIT 1').get() as Row | undefined;
+  const r = db.prepare('SELECT * FROM monitors ORDER BY name COLLATE NOCASE, id LIMIT 1').get() as Row | undefined;
   return r ? toMonitor(r) : null;
 }
 
