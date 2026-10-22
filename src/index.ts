@@ -33,6 +33,30 @@ if (Number.isNaN(major) || major < MIN_NODE_MAJOR) {
   process.exit(1);
 }
 
+// Refuse to start with an empty AUTH_PASSWORD unless the operator has opted
+// into the no-auth LAN mode. The default install previously printed a warning
+// and carried on -- easy to miss on a public-facing deploy where every
+// monitor target is then readable by anyone who can reach the port.
+if (!process.env.AUTH_PASSWORD && process.env.ALLOW_NO_PASSWORD !== 'true') {
+  console.error(
+    [
+      '',
+      '  Refusing to start: AUTH_PASSWORD is not set.',
+      '',
+      '  An empty AUTH_PASSWORD leaves the API open to anyone who can reach',
+      '  this port. They can read every monitor target and make this server',
+      '  issue requests to hosts it can reach (the documented "request',
+      '  primitive"). Fine on a trusted LAN; dangerous on a public deploy.',
+      '',
+      '  Pick one of:',
+      '    export AUTH_PASSWORD=$(openssl rand -hex 24)   # recommended',
+      '    export ALLOW_NO_PASSWORD=true                  # only on a trusted LAN',
+      '',
+    ].join('\n'),
+  );
+  process.exit(1);
+}
+
 try {
   const { start } = await import('./app.ts');
   await start();
